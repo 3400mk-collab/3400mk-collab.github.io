@@ -43,9 +43,13 @@
     const video = document.getElementById('video');
     const statusDiv = document.getElementById('status');
     let model;
-    let lastMessage = "";
-    let speaking = false;
-    let detectionLoopId; // Para controlar el bucle de detección
+    let lastSpokenMessage = "";
+    let isDetecting = false; // Flag para controlar el bucle de detección
+
+    // --- Constantes para la detección (mejor para ajustar) ---
+    const MIN_AREA_CLOSE_OBJECT = 30000; // Área mínima para considerar un objeto "cercano"
+    const MIN_AREA_WALL = 200000; // Área mínima para considerar una pared
+    const WALL_Y_THRESHOLD = 150; // Posición Y máxima para ser considerada pared
 
     // Ocultar elementos al inicio para que el botón de inicio sea el protagonista
     video.style.display = 'none';
@@ -53,15 +57,13 @@
 
     // Activar voz del navegador
     function speak(message) {
-      if (speaking || message === lastMessage) return;
+      // Solo hablar si el mensaje es nuevo y no se está hablando ya
+      if (window.speechSynthesis.speaking || message === lastSpokenMessage) return;
+
       const utterance = new SpeechSynthesisUtterance(message);
       utterance.lang = 'es-MX';
-      speaking = true;
-      utterance.onend = () => {
-        speaking = false;
-      };
       window.speechSynthesis.speak(utterance);
-      lastMessage = message;
+      lastSpokenMessage = message;
       statusDiv.textContent = message;
     }
 
@@ -84,8 +86,9 @@
     // Cargar modelo
     async function loadModel() {
       try {
-        model = await cocoSsd.load();
-        statusDiv.textContent = "Modelo cargado ✅";
+        // Usamos el modelo 'lite_mobilenet_v2' que es mucho más rápido en móviles
+        model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        statusDiv.textContent = "Asistente listo ✅";
         detectFrame(); // Iniciar el bucle de detección
       } catch (error) {
         console.error("Error al cargar el modelo:", error);
@@ -96,11 +99,15 @@
 
     // Lógica de detección
     async function detectFrame() {
-      // Si el modelo o el video no están listos, se sigue el bucle pero no se detecta
-      if (!model || video.paused || video.ended) {
-        detectionLoopId = requestAnimationFrame(detectFrame);
+      // Optimización: Si ya estamos detectando, no empezamos una nueva detección.
+      // Esto evita sobrecargar el teléfono.
+      if (isDetecting || !model || video.paused || video.ended) {
+        requestAnimationFrame(detectFrame);
         return;
       }
+
+      isDetecting = true; // Marcamos que estamos empezando a detectar
+
       const predictions = await model.detect(video);
 
       let hasObstacle = false;
@@ -113,12 +120,12 @@
         const [x, y, width, height] = obj.bbox;
         const area = width * height;
 
-        if (obj.class === 'person' && area > 30000) personClose = true;
-        if ((obj.class === 'car' || obj.class === 'truck' || obj.class === 'bus') && area > 30000) vehicleClose = true;
+        if (obj.class === 'person' && area > MIN_AREA_CLOSE_OBJECT) personClose = true;
+        if ((obj.class === 'car' || obj.class === 'truck' || obj.class === 'bus') && area > MIN_AREA_CLOSE_OBJECT) vehicleClose = true;
         if (obj.class === 'bench' || obj.class === 'chair' || obj.class === 'bicycle') hasObstacle = true;
 
         // Detectar "pared" o "superficie cercana"
-        if (area > 200000 && y < 150) wallDetected = true;
+        if (area > MIN_AREA_WALL && y < WALL_Y_THRESHOLD) wallDetected = true;
       }
 
       if (wallDetected) message = "Pared al frente, deténgase.";
@@ -126,9 +133,14 @@
       else if (vehicleClose) message = "Vehículo cerca, precaución.";
       else if (hasObstacle) message = "Hay un objeto obstruyendo el camino.";
       else message = "Camino libre.";
+      
+      // Solo hablamos si el mensaje ha cambiado para no ser repetitivos
+      if (message !== lastSpokenMessage) {
+        speak(message);
+      }
 
-      speak(message);
-      detectionLoopId = requestAnimationFrame(detectFrame);
+      isDetecting = false; // Marcamos que hemos terminado
+      requestAnimationFrame(detectFrame); // Solicitamos el siguiente cuadro
     }
 
     // Función principal que se ejecuta al pulsar el botón
@@ -146,9 +158,7 @@
     window.addEventListener('beforeunload', () => {
       if (video.srcObject) {
         video.srcObject.getTracks().forEach(track => track.stop());
-      }
-      if (detectionLoopId) {
-        cancelAnimationFrame(detectionLoopId);
+        model = null; // Liberar el modelo
       }
       window.speechSynthesis.cancel();
     });
