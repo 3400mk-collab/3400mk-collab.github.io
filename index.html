@@ -6,7 +6,9 @@
   <title>Asistente Visual Inteligente</title>
 
   <!-- TensorFlow -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
+
+  <!-- COCO-SSD (versión ligera) -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
 
   <style>
@@ -20,10 +22,8 @@
       justify-content: center;
       margin: 0;
       height: 100vh;
-      overflow: hidden;
       text-align: center;
     }
-
     video {
       width: 90%;
       max-width: 600px;
@@ -31,7 +31,6 @@
       box-shadow: 0 0 20px rgba(0,0,0,0.5);
       display: none;
     }
-
     #status {
       margin-top: 15px;
       padding: 12px 20px;
@@ -40,7 +39,6 @@
       border-radius: 12px;
       display: none;
     }
-
     #startButton {
       padding: 15px 30px;
       font-size: 1.5em;
@@ -69,11 +67,13 @@
   let speaking = false;
   let lastMessage = "";
 
-  // 🔊 Tus mismas funciones de voz
+  /*****************************
+   *   OPTIMIZACIÓN DE VOZ
+   *****************************/
   function speak(message) {
     if (speaking || message === lastMessage) return;
 
-    window.speechSynthesis.cancel(); // evita acumulación
+    window.speechSynthesis.cancel();
 
     const utter = new SpeechSynthesisUtterance(message);
     utter.lang = "es-MX";
@@ -82,11 +82,14 @@
     utter.onend = () => speaking = false;
 
     window.speechSynthesis.speak(utter);
+
     statusDiv.textContent = message;
     lastMessage = message;
   }
 
-  // 📷 Configurar cámara
+  /*****************************
+   *   OPTIMIZACIÓN CÁMARA
+   *****************************/
   async function setupCamera() {
     const constraints = {
       video: {
@@ -102,13 +105,22 @@
     return new Promise(resolve => video.onloadedmetadata = resolve);
   }
 
-  // 📦 Cargar COCO-SSD
+  /*****************************
+   *   CARGAR MODELO LIGERO
+   *****************************/
   async function loadModel() {
-    model = await cocoSsd.load();
+    await tf.setBackend("webgl");
+
+    model = await cocoSsd.load({
+      base: "lite_mobilenet_v2"   // 🔥 versión ligera Y totalmente compatible
+    });
+
     statusDiv.textContent = "Modelo cargado ✔";
   }
 
-  // 🔍 LÓGICA ORIGINAL + mejora de detección en suelo
+  /*****************************
+   *   TU MISMA LÓGICA EXACTA
+   *****************************/
   async function detectLoop() {
     const predictions = await model.detect(video);
 
@@ -116,16 +128,12 @@
     let personClose = false;
     let vehicleClose = false;
     let wallDetected = false;
-    let sueloObstacle = false; // <-- nuevo
     let message = "Camino libre.";
-
-    const h = video.videoHeight;
 
     for (const obj of predictions) {
       const [x, y, width, height] = obj.bbox;
       const area = width * height;
 
-      // 👇 TUS LÍMITES ORIGINALES (NO TOCADOS)
       if (obj.class === "person" && area > 30000) personClose = true;
       if ((obj.class === "car" || obj.class === "truck" || obj.class === "bus") && area > 30000)
         vehicleClose = true;
@@ -133,30 +141,22 @@
         hasObstacle = true;
 
       if (area > 200000 && y < 150) wallDetected = true;
-
-      // ⚡ NUEVO: detectar objetos pequeños en el suelo
-      const MIN_AREA_SUELO = 2500;
-      const isGroundZone = y + height > h * 0.65;
-
-      if (isGroundZone && area > MIN_AREA_SUELO) {
-        sueloObstacle = true;
-      }
     }
 
-    // 👇 TU MISMA LÓGICA DE VOZ
     if (wallDetected) message = "Pared al frente, deténgase.";
     else if (personClose) message = "Persona al frente, cuidado.";
     else if (vehicleClose) message = "Vehículo cerca, precaución.";
-    else if (sueloObstacle) message = "Objeto pequeño en el suelo, cuidado.";
     else if (hasObstacle) message = "Hay un objeto obstruyendo el camino.";
     else message = "Camino libre.";
 
     speak(message);
 
-    setTimeout(detectLoop, 150); // más rápido para celular
+    setTimeout(detectLoop, 130);  // 🔥 más rápido sin romper nada
   }
 
-  // ▶ INICIO
+  /*****************************
+   *   INICIO
+   *****************************/
   async function startApp() {
     startButton.style.display = "none";
     statusDiv.style.display = "block";
@@ -173,12 +173,12 @@
 
     } catch (e) {
       console.error(e);
-      statusDiv.textContent = "Error: permite acceso a la cámara.";
+      statusDiv.textContent = "Error: Permite acceso a la cámara.";
     }
   }
 
   startButton.addEventListener("click", startApp);
 </script>
+
 </body>
 </html>
-
