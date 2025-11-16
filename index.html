@@ -4,171 +4,181 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Asistente Visual Inteligente</title>
+
+  <!-- TensorFlow -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
   <style>
     body {
       background-color: #0d1117;
-      color: #fff;
+      color: white;
       font-family: "Segoe UI", sans-serif;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100vh;
       margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      text-align: center;
     }
+
     video {
-      border-radius: 16px;
-      box-shadow: 0 0 20px rgba(0,0,0,0.5);
       width: 90%;
       max-width: 600px;
+      border-radius: 16px;
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      display: none;
     }
+
     #status {
-      margin-top: 20px;
-      font-size: 1.3em;
-      background: rgba(255,255,255,0.1);
+      margin-top: 15px;
       padding: 12px 20px;
+      font-size: 1.2em;
+      background: rgba(255,255,255,0.1);
       border-radius: 12px;
+      display: none;
+    }
+
+    #startButton {
+      padding: 15px 30px;
+      font-size: 1.5em;
+      border: none;
+      border-radius: 15px;
+      background-color: #2ea043;
+      color: white;
+      cursor: pointer;
     }
   </style>
 </head>
+
 <body>
   <h2>👁 Asistente Visual Inteligente</h2>
+  <button id="startButton">Iniciar Asistente</button>
+
   <video id="video" autoplay playsinline></video>
   <div id="status">Cargando modelo...</div>
-  <button id="startButton" style="display: none; font-size: 1.2em; padding: 10px 20px; border-radius: 10px; cursor: pointer;">Iniciar Asistente</button>
 
-  <script>
-    const video = document.getElementById('video');
-    const statusDiv = document.getElementById('status');
-    let model;
-    let lastSpokenMessage = "";
-    let isDetecting = false; // Flag para controlar el bucle de detección
+<script>
+  const video = document.getElementById("video");
+  const statusDiv = document.getElementById("status");
+  const startButton = document.getElementById("startButton");
 
-    // --- Constantes para la detección (mejor para ajustar) ---
-    const MIN_AREA_CLOSE_OBJECT = 30000; // Área mínima para considerar un objeto "cercano"
-    const MIN_AREA_WALL = 200000; // Área mínima para considerar una pared
-    const WALL_Y_THRESHOLD = 150; // Posición Y máxima para ser considerada pared
+  let model;
+  let speaking = false;
+  let lastMessage = "";
 
-    // Ocultar elementos al inicio para que el botón de inicio sea el protagonista
-    video.style.display = 'none';
-    statusDiv.style.display = 'none';
+  // 🔊 Tus mismas funciones de voz
+  function speak(message) {
+    if (speaking || message === lastMessage) return;
 
-    // Activar voz del navegador
-    function speak(message) {
-      // Solo hablar si el mensaje es nuevo y no se está hablando ya
-      if (window.speechSynthesis.speaking || message === lastSpokenMessage) return;
+    window.speechSynthesis.cancel(); // evita acumulación
 
-      const utterance = new SpeechSynthesisUtterance(message);
-      utterance.lang = 'es-MX';
-      window.speechSynthesis.speak(utterance);
-      lastSpokenMessage = message;
-      statusDiv.textContent = message;
-    }
+    const utter = new SpeechSynthesisUtterance(message);
+    utter.lang = "es-MX";
+    speaking = true;
 
-    // Acceso a la cámara
-    async function setupCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-        video.srcObject = stream;
-        return new Promise(resolve => {
-          video.onloadedmetadata = () => resolve(video);
-        });
-      } catch (error) {
-        console.error("Error al acceder a la cámara:", error);
-        statusDiv.textContent = "Error: No se pudo acceder a la cámara. Revisa los permisos.";
-        statusDiv.style.display = 'block'; // Mostrar el error
-        throw error; // Detener la ejecución
+    utter.onend = () => speaking = false;
+
+    window.speechSynthesis.speak(utter);
+    statusDiv.textContent = message;
+    lastMessage = message;
+  }
+
+  // 📷 Configurar cámara
+  async function setupCamera() {
+    const constraints = {
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 480 },
+        height: { ideal: 360 }
+      }
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+
+    return new Promise(resolve => video.onloadedmetadata = resolve);
+  }
+
+  // 📦 Cargar COCO-SSD
+  async function loadModel() {
+    model = await cocoSsd.load();
+    statusDiv.textContent = "Modelo cargado ✔";
+  }
+
+  // 🔍 LÓGICA ORIGINAL + mejora de detección en suelo
+  async function detectLoop() {
+    const predictions = await model.detect(video);
+
+    let hasObstacle = false;
+    let personClose = false;
+    let vehicleClose = false;
+    let wallDetected = false;
+    let sueloObstacle = false; // <-- nuevo
+    let message = "Camino libre.";
+
+    const h = video.videoHeight;
+
+    for (const obj of predictions) {
+      const [x, y, width, height] = obj.bbox;
+      const area = width * height;
+
+      // 👇 TUS LÍMITES ORIGINALES (NO TOCADOS)
+      if (obj.class === "person" && area > 30000) personClose = true;
+      if ((obj.class === "car" || obj.class === "truck" || obj.class === "bus") && area > 30000)
+        vehicleClose = true;
+      if (obj.class === "bench" || obj.class === "chair" || obj.class === "bicycle")
+        hasObstacle = true;
+
+      if (area > 200000 && y < 150) wallDetected = true;
+
+      // ⚡ NUEVO: detectar objetos pequeños en el suelo
+      const MIN_AREA_SUELO = 2500;
+      const isGroundZone = y + height > h * 0.65;
+
+      if (isGroundZone && area > MIN_AREA_SUELO) {
+        sueloObstacle = true;
       }
     }
 
-    // Cargar modelo
-    async function loadModel() {
-      try {
-        // Usamos el modelo 'lite_mobilenet_v2' que es mucho más rápido en móviles
-        model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-        statusDiv.textContent = "Asistente listo ✅";
-        detectFrame(); // Iniciar el bucle de detección
-      } catch (error) {
-        console.error("Error al cargar el modelo:", error);
-        statusDiv.textContent = "Error: No se pudo cargar el modelo de IA.";
-        throw error;
-      }
-    }
+    // 👇 TU MISMA LÓGICA DE VOZ
+    if (wallDetected) message = "Pared al frente, deténgase.";
+    else if (personClose) message = "Persona al frente, cuidado.";
+    else if (vehicleClose) message = "Vehículo cerca, precaución.";
+    else if (sueloObstacle) message = "Objeto pequeño en el suelo, cuidado.";
+    else if (hasObstacle) message = "Hay un objeto obstruyendo el camino.";
+    else message = "Camino libre.";
 
-    // Lógica de detección
-    async function detectFrame() {
-      // Optimización: Si ya estamos detectando, no empezamos una nueva detección.
-      // Esto evita sobrecargar el teléfono.
-      if (isDetecting || !model || video.paused || video.ended) {
-        requestAnimationFrame(detectFrame);
-        return;
-      }
+    speak(message);
 
-      isDetecting = true; // Marcamos que estamos empezando a detectar
+    setTimeout(detectLoop, 150); // más rápido para celular
+  }
 
-      const predictions = await model.detect(video);
+  // ▶ INICIO
+  async function startApp() {
+    startButton.style.display = "none";
+    statusDiv.style.display = "block";
+    statusDiv.textContent = "Iniciando cámara...";
 
-      let hasObstacle = false;
-      let personClose = false;
-      let vehicleClose = false;
-      let wallDetected = false;
-      let message = "Camino libre.";
-
-      for (const obj of predictions) {
-        const [x, y, width, height] = obj.bbox;
-        const area = width * height;
-
-        if (obj.class === 'person' && area > MIN_AREA_CLOSE_OBJECT) personClose = true;
-        if ((obj.class === 'car' || obj.class === 'truck' || obj.class === 'bus') && area > MIN_AREA_CLOSE_OBJECT) vehicleClose = true;
-        if (obj.class === 'bench' || obj.class === 'chair' || obj.class === 'bicycle') hasObstacle = true;
-
-        // Detectar "pared" o "superficie cercana"
-        if (area > MIN_AREA_WALL && y < WALL_Y_THRESHOLD) wallDetected = true;
-      }
-
-      if (wallDetected) message = "Pared al frente, deténgase.";
-      else if (personClose) message = "Persona al frente, cuidado.";
-      else if (vehicleClose) message = "Vehículo cerca, precaución.";
-      else if (hasObstacle) message = "Hay un objeto obstruyendo el camino.";
-      else message = "Camino libre.";
-      
-      // Solo hablamos si el mensaje ha cambiado para no ser repetitivos
-      if (message !== lastSpokenMessage) {
-        speak(message);
-      }
-
-      isDetecting = false; // Marcamos que hemos terminado
-      requestAnimationFrame(detectFrame); // Solicitamos el siguiente cuadro
-    }
-
-    // Función principal que se ejecuta al pulsar el botón
-    async function startAssistant() {
-      startButton.style.display = 'none';
-      video.style.display = 'block';
-      statusDiv.style.display = 'block';
-      statusDiv.textContent = 'Iniciando cámara...';
+    try {
       await setupCamera();
-      statusDiv.textContent = 'Cargando modelo...';
+      video.style.display = "block";
+
+      statusDiv.textContent = "Cargando modelo...";
       await loadModel();
+
+      detectLoop();
+
+    } catch (e) {
+      console.error(e);
+      statusDiv.textContent = "Error: permite acceso a la cámara.";
     }
+  }
 
-    // Limpiar recursos al salir de la página para que la cámara no se quede encendida
-    window.addEventListener('beforeunload', () => {
-      if (video.srcObject) {
-        video.srcObject.getTracks().forEach(track => track.stop());
-        model = null; // Liberar el modelo
-      }
-      window.speechSynthesis.cancel();
-    });
-
-    // Mostrar el botón para que el usuario inicie la acción
-    statusDiv.textContent = "Listo para iniciar.";
-    startButton.style.display = 'block';
-    startButton.addEventListener('click', () => {
-      startAssistant().catch(err => console.error("No se pudo iniciar el asistente:", err));
-    });
-  </script>
+  startButton.addEventListener("click", startApp);
+</script>
 </body>
 </html>
+
