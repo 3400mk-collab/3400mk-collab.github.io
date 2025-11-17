@@ -5,48 +5,46 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Asistente Visual Inteligente</title>
 
-  <!-- TensorFlow -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
-
-  <!-- COCO-SSD (versión ligera) -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+  <!-- YOLO Nano -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
 
   <style>
     body {
       background-color: #0d1117;
-      color: white;
+      color: #fff;
       font-family: "Segoe UI", sans-serif;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      margin: 0;
       height: 100vh;
-      text-align: center;
+      margin: 0;
     }
     video {
-      width: 90%;
-      max-width: 600px;
       border-radius: 16px;
       box-shadow: 0 0 20px rgba(0,0,0,0.5);
-      display: none;
+      width: 90%;
+      max-width: 600px;
     }
     #status {
-      margin-top: 15px;
-      padding: 12px 20px;
-      font-size: 1.2em;
+      margin-top: 20px;
+      font-size: 1.3em;
       background: rgba(255,255,255,0.1);
+      padding: 12px 20px;
       border-radius: 12px;
-      display: none;
     }
     #startButton {
-      padding: 15px 30px;
       font-size: 1.5em;
-      border: none;
+      padding: 15px 30px;
       border-radius: 15px;
+      border: none;
       background-color: #2ea043;
       color: white;
       cursor: pointer;
+      transition: background-color 0.3s;
+    }
+    #startButton:hover {
+      background-color: #268839;
     }
   </style>
 </head>
@@ -54,131 +52,117 @@
 <body>
   <h2>👁 Asistente Visual Inteligente</h2>
   <button id="startButton">Iniciar Asistente</button>
-
   <video id="video" autoplay playsinline></video>
-  <div id="status">Cargando modelo...</div>
+  <div id="status">Cargando...</div>
 
-<script>
-  const video = document.getElementById("video");
-  const statusDiv = document.getElementById("status");
-  const startButton = document.getElementById("startButton");
+  <script>
+    // 🔧 FIX: Permiso universal para cámara (corrige el error en PC y móviles)
+    navigator.mediaDevices.getUserMedia =
+      navigator.mediaDevices.getUserMedia ||
+      navigator.mediaDevices.webkitGetUserMedia ||
+      navigator.mediaDevices.mozGetUserMedia;
 
-  let model;
-  let speaking = false;
-  let lastMessage = "";
+    const video = document.getElementById("video");
+    const statusDiv = document.getElementById("status");
+    const startButton = document.getElementById("startButton");
 
-  /*****************************
-   *   OPTIMIZACIÓN DE VOZ
-   *****************************/
-  function speak(message) {
-    if (speaking || message === lastMessage) return;
+    let human;
+    let lastMessage = "";
+    let speaking = false;
 
-    window.speechSynthesis.cancel();
+    video.style.display = "none";
+    statusDiv.style.display = "none";
 
-    const utter = new SpeechSynthesisUtterance(message);
-    utter.lang = "es-MX";
-    speaking = true;
-
-    utter.onend = () => speaking = false;
-
-    window.speechSynthesis.speak(utter);
-
-    statusDiv.textContent = message;
-    lastMessage = message;
-  }
-
-  /*****************************
-   *   OPTIMIZACIÓN CÁMARA
-   *****************************/
-  async function setupCamera() {
-    const constraints = {
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 480 },
-        height: { ideal: 360 }
-      }
-    };
-
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = stream;
-
-    return new Promise(resolve => video.onloadedmetadata = resolve);
-  }
-
-  /*****************************
-   *   CARGAR MODELO LIGERO
-   *****************************/
-  async function loadModel() {
-    await tf.setBackend("webgl");
-
-    model = await cocoSsd.load({
-      base: "lite_mobilenet_v2"   // 🔥 versión ligera Y totalmente compatible
-    });
-
-    statusDiv.textContent = "Modelo cargado ✔";
-  }
-
-  /*****************************
-   *   TU MISMA LÓGICA EXACTA
-   *****************************/
-  async function detectLoop() {
-    const predictions = await model.detect(video);
-
-    let hasObstacle = false;
-    let personClose = false;
-    let vehicleClose = false;
-    let wallDetected = false;
-    let message = "Camino libre.";
-
-    for (const obj of predictions) {
-      const [x, y, width, height] = obj.bbox;
-      const area = width * height;
-
-      if (obj.class === "person" && area > 30000) personClose = true;
-      if ((obj.class === "car" || obj.class === "truck" || obj.class === "bus") && area > 30000)
-        vehicleClose = true;
-      if (obj.class === "bench" || obj.class === "chair" || obj.class === "bicycle")
-        hasObstacle = true;
-
-      if (area > 200000 && y < 150) wallDetected = true;
+    // VOZ
+    function speak(message) {
+      if (speaking || message === lastMessage) return;
+      const utter = new SpeechSynthesisUtterance(message);
+      utter.lang = "es-MX";
+      speaking = true;
+      utter.onend = () => (speaking = false);
+      window.speechSynthesis.speak(utter);
+      statusDiv.textContent = message;
+      lastMessage = message;
     }
 
-    if (wallDetected) message = "Pared al frente, deténgase.";
-    else if (personClose) message = "Persona al frente, cuidado.";
-    else if (vehicleClose) message = "Vehículo cerca, precaución.";
-    else if (hasObstacle) message = "Hay un objeto obstruyendo el camino.";
-    else message = "Camino libre.";
+    // CÁMARA
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+      video.srcObject = stream;
+      return new Promise((resolve) => {
+        video.onloadedmetadata = () => {
+          video.play();
+          resolve();
+        };
+      });
+    }
 
-    speak(message);
+    // DETECCIÓN
+    async function detect() {
+      const result = await human.detect(video);
 
-    setTimeout(detectLoop, 130);  // 🔥 más rápido sin romper nada
-  }
+      let hasObstacle = false;
+      let personClose = false;
+      let vehicleClose = false;
+      let wallDetected = false;
+      let message = "Camino libre.";
 
-  /*****************************
-   *   INICIO
-   *****************************/
-  async function startApp() {
-    startButton.style.display = "none";
-    statusDiv.style.display = "block";
-    statusDiv.textContent = "Iniciando cámara...";
+      result.objects.forEach((obj) => {
+        const { label, box } = obj;
+        const area = box[2] * box[3];
+        const y = box[1];
 
-    try {
-      await setupCamera();
+        if (label === "person" && area > 30000) personClose = true;
+        if (["car", "truck", "bus", "motorcycle"].includes(label) && area > 30000) vehicleClose = true;
+        if (["chair", "bench", "bicycle"].includes(label)) hasObstacle = true;
+        if (area > 200000 && y < 150) wallDetected = true;
+      });
+
+      if (wallDetected) message = "Pared al frente, deténgase.";
+      else if (personClose) message = "Persona al frente, cuidado.";
+      else if (vehicleClose) message = "Vehículo cerca, precaución.";
+      else if (hasObstacle) message = "Objeto obstruyendo el camino.";
+
+      speak(message);
+      requestAnimationFrame(detect);
+    }
+
+    // INICIAR APP
+    async function startApp() {
+      startButton.style.display = "none";
       video.style.display = "block";
+      statusDiv.style.display = "block";
 
-      statusDiv.textContent = "Cargando modelo...";
-      await loadModel();
+      try {
+        statusDiv.textContent = "Iniciando cámara…";
+        await setupCamera();
 
-      detectLoop();
+        human = new Human({
+          modelBasePath: "https://cdn.jsdelivr.net/npm/@vladmandic/human/models",
+          object: { enabled: true, modelPath: "yolo-nano" }, 
+          filter: { enabled: false },
+        });
 
-    } catch (e) {
-      console.error(e);
-      statusDiv.textContent = "Error: Permite acceso a la cámara.";
+        statusDiv.textContent = "Cargando YOLO Nano…";
+        await human.load();
+        await human.warmup();
+
+        statusDiv.textContent = "Modelo cargado ✔";
+        detect();
+
+      } catch (e) {
+        statusDiv.textContent = "No se pudo acceder a la cámara.";
+        console.error(e);
+      }
     }
-  }
 
-  startButton.addEventListener("click", startApp);
-</script>
-
+    startButton.addEventListener("click", startApp);
+  </script>
 </body>
 </html>
