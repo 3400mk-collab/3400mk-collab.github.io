@@ -4,10 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Asistente Visual Inteligente</title>
-
-  <!-- ✨ MEJORA DE SEGURIDAD: Añadido 'integrity' y 'crossorigin' para SRI -->
-  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js" integrity="sha256-a6d13sL/ufx2n2B2PAv2Yv2T2ERm2l2A2L2A2L2A2L2A=" crossorigin="anonymous"></script>
-
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
   <style>
     body {
       background-color: #0d1117;
@@ -48,162 +46,139 @@
     }
   </style>
 </head>
-
 <body>
   <h2>👁 Asistente Visual Inteligente</h2>
   <button id="startButton">Iniciar Asistente</button>
   <video id="video" autoplay playsinline></video>
-  <div id="status">Cargando...</div>
+  <div id="status">Cargando modelo...</div>
 
   <script>
-    const video = document.getElementById("video");
-    const statusDiv = document.getElementById("status");
-    const startButton = document.getElementById("startButton");
-
-    let human;
+    const video = document.getElementById('video');
+    const statusDiv = document.getElementById('status');
+    const startButton = document.getElementById('startButton');
+    let model;
+    let lastMessage = "";
+    let lastDetectionTime = 0;
     let speaking = false;
+    let detectionLoopId; // Para controlar el bucle de detección
 
-    video.style.display = "none";
-    statusDiv.style.display = "none";
+    // Ocultar elementos al inicio para que el botón de inicio sea el protagonista
+    video.style.display = 'none';
+    statusDiv.style.display = 'none';
 
-    // VOZ
+    // Activar voz del navegador
     function speak(message) {
-      if (speaking || !message) return;
-      const utter = new SpeechSynthesisUtterance(message);
-      utter.lang = "es-MX";
+      if (speaking || message === lastMessage) return;
+      const utterance = new SpeechSynthesisUtterance(message);
+      utterance.lang = 'es-MX';
       speaking = true;
-      utter.onend = () => (speaking = false);
-      window.speechSynthesis.speak(utter);
+      utterance.onend = () => {
+        speaking = false;
+      };
+      window.speechSynthesis.speak(utterance);
+      lastMessage = message;
       statusDiv.textContent = message;
     }
 
+    // Acceso a la cámara
     async function setupCamera() {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        // ✨ MEJORA: Se simplifican las restricciones para máxima compatibilidad.
-        video: { facingMode: "environment" }
-      });
-      video.srcObject = stream;
-      return new Promise((resolve) => {
-        video.onloadedmetadata = () => {
-          video.play();
-          resolve();
-        };
-      });
-    }
-
-    // 🔥 DETECCIÓN REAL DE PAREDES / OBSTÁCULOS / VEHÍCULOS / PERSONAS / SEÑALES
-    async function detectionLoop() {
-      while (true) {
-        if (!video.paused) {
-          const result = await human.detect(video);
-
-          const objects = result.objects;
-
-          let message = "";
-
-          // 🔥 ZONA DE PELIGRO
-          const dangerZone = {
-            x1: video.videoWidth * 0.25,
-            x2: video.videoWidth * 0.75,
-            y1: video.videoHeight * 0.45,
-            y2: video.videoHeight * 0.95
-          };
-
-          function isInDangerZone(box) {
-            const [x, y, w, h] = box;
-            const cx = x + w / 2;
-            const cy = y + h / 2;
-            return (cx > dangerZone.x1 && cx < dangerZone.x2 && cy > dangerZone.y1 && cy < dangerZone.y2);
-          }
-
-          // 🔥 Detectar pared por GEOMETRÍA
-          const wallDetected = objects.some(obj => {
-            const area = obj.box[2] * obj.box[3];
-            return area > video.videoWidth * video.videoHeight * 0.45 && obj.box[1] < 200;
-          });
-
-          if (wallDetected) {
-            speak("Pared al frente.");
-            await new Promise(r => setTimeout(r, 1500));
-            continue;
-          }
-
-          // 🔥 Detectar personas
-          const person = objects.find(o => o.label === "person" && isInDangerZone(o.box));
-          if (person) {
-            speak("Persona al frente.");
-            await new Promise(r => setTimeout(r, 1500));
-            continue;
-          }
-
-          // 🔥 Detectar vehículos
-          const vehicle = objects.find(o =>
-            ["car", "truck", "bus", "motorcycle"].includes(o.label) &&
-            isInDangerZone(o.box)
-          );
-          if (vehicle) {
-            speak("Vehículo cerca.");
-            await new Promise(r => setTimeout(r, 1500));
-            continue;
-          }
-
-          // 🔥 Detectar señales de tránsito
-          const sign = objects.find(o =>
-            ["stop sign", "traffic light"].includes(o.label)
-          );
-          if (sign && isInDangerZone(sign.box)) {
-            speak("Señal de tránsito adelante.");
-            await new Promise(r => setTimeout(r, 1500));
-            continue;
-          }
-
-          // 🔥 Detectar objetos que obstruyen
-          const obstacle = objects.find(o =>
-            ["chair", "bench", "bicycle", "umbrella"].includes(o.label) &&
-            isInDangerZone(o.box)
-          );
-          if (obstacle) {
-            speak("Objeto obstruyendo el camino.");
-            await new Promise(r => setTimeout(r, 1500));
-            continue;
-          }
-        }
-
-        await new Promise(resolve => requestAnimationFrame(resolve));
-      }
-    }
-
-    async function startApp() {
-      startButton.style.display = "none";
-      video.style.display = "block";
-      statusDiv.style.display = "block";
-
+      // Priorizamos la cámara trasera (environment) para móviles.
+      const constraints = { video: { facingMode: 'environment' } };
       try {
-        statusDiv.textContent = "Iniciando cámara…";
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+      } catch (err) {
+        console.warn("Cámara trasera no encontrada, intentando con la frontal.", err);
+        // Si falla (ej. en una laptop), intentamos con cualquier cámara disponible.
+        const fallbackConstraints = { video: true };
+        const stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        video.srcObject = stream;
+      }
+      
+      // Añadimos un pequeño efecto visual para indicar que el video está activo
+      video.style.border = "3px solid #2ea043";
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => resolve(video);
+      });
+    }
+
+    // Cargar modelo
+    async function loadModel() {
+      // Usamos una versión más ligera del modelo, optimizada para móviles.
+      model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+      statusDiv.textContent = "Modelo cargado ✅";
+      detectFrame(); // Iniciar el bucle de detección
+    }
+
+    // Lógica de detección
+    async function detectFrame() {
+      // Control para no ejecutar la detección en cada frame (optimización para móviles)
+      const now = performance.now();
+      const elapsed = now - lastDetectionTime;
+      if (elapsed < 500) { // Ejecutar detección ~2 veces por segundo
+        detectionLoopId = requestAnimationFrame(detectFrame);
+        return;
+      }
+      lastDetectionTime = now;
+
+      // Si el modelo o el video no están listos, se sigue el bucle pero no se detecta
+      if (!model || video.paused || video.ended) {
+        detectionLoopId = requestAnimationFrame(detectFrame);
+        return;
+      }
+
+      const predictions = await model.detect(video);
+
+      let personClose = false;
+      let vehicleClose = false;
+      let wallDetected = false;
+      let message = "Camino libre.";
+
+      for (const obj of predictions) {
+        const [x, y, width, height] = obj.bbox;
+        const area = width * height;
+
+        if (obj.class === 'person' && area > 30000) personClose = true;
+        if ((obj.class === 'car' || obj.class === 'truck' || obj.class === 'bus') && area > 40000) vehicleClose = true;
+
+        // Detectar "pared" o "superficie cercana"
+        // Un objeto muy grande que ocupa la mayor parte de la vista.
+        if (area > (video.videoWidth * video.videoHeight * 0.6)) wallDetected = true;
+      }
+
+      if (wallDetected) message = "Pared al frente, deténgase.";
+      else if (personClose) message = "Persona al frente, cuidado.";
+      else if (vehicleClose) message = "Vehículo cerca, precaución.";
+      else message = "Camino libre.";
+
+      speak(message);
+      detectionLoopId = requestAnimationFrame(detectFrame);
+    }
+
+    // Función principal que se ejecuta al pulsar el botón
+    async function startApp() {
+      startButton.style.display = 'none';
+      video.style.display = 'block';
+      statusDiv.style.display = 'block';
+      
+      try {
+        statusDiv.textContent = "Iniciando cámara...";
         await setupCamera();
-
-        human = new Human({
-          modelBasePath: "https://cdn.jsdelivr.net/npm/@vladmandic/human/models",
-          object: {
-            enabled: true,
-            modelPath: "object/yolo-nano.json"
-          }
-        });
-
-        statusDiv.textContent = "Cargando modelo…";
-        await human.load();
-        await human.warmup();
-
-        statusDiv.textContent = "Modelo cargado ✔";
-        detectionLoop();
-
-      } catch (e) {
-        statusDiv.textContent = `Error: ${e.message}`;
-        console.error(e);
+        statusDiv.textContent = "Cargando modelo...";
+        await loadModel();
+      } catch (error) {
+        console.error("Error al iniciar la aplicación:", error);
+        // Manejo de errores específico para la cámara
+        if (error.name === "NotAllowedError") {
+          statusDiv.textContent = "Permiso de cámara denegado. Se requiere acceso para funcionar.";
+        } else {
+          statusDiv.textContent = "Error al iniciar la cámara. Asegúrate de que no esté en uso.";
+        }
       }
     }
 
-    startButton.addEventListener("click", startApp);
+    startButton.addEventListener('click', startApp);
+
   </script>
 </body>
 </html>
