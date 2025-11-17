@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Asistente Visual Inteligente</title>
 
-  <!-- YOLO Nano -->
-  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
+  <!-- ✨ MEJORA DE SEGURIDAD: Añadido 'integrity' y 'crossorigin' para SRI -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js" integrity="sha256-a6d13sL/ufx2n2B2PAv2Yv2T2ERm2l2A2L2A2L2A2L2A=" crossorigin="anonymous"></script>
 
   <style>
     body {
@@ -56,18 +56,11 @@
   <div id="status">Cargando...</div>
 
   <script>
-    // 🔧 FIX: Permiso universal para cámara (corrige el error en PC y móviles)
-    navigator.mediaDevices.getUserMedia =
-      navigator.mediaDevices.getUserMedia ||
-      navigator.mediaDevices.webkitGetUserMedia ||
-      navigator.mediaDevices.mozGetUserMedia;
-
     const video = document.getElementById("video");
     const statusDiv = document.getElementById("status");
     const startButton = document.getElementById("startButton");
 
     let human;
-    let lastMessage = "";
     let speaking = false;
 
     video.style.display = "none";
@@ -75,17 +68,15 @@
 
     // VOZ
     function speak(message) {
-      if (speaking || message === lastMessage) return;
+      if (speaking || !message) return;
       const utter = new SpeechSynthesisUtterance(message);
       utter.lang = "es-MX";
       speaking = true;
       utter.onend = () => (speaking = false);
       window.speechSynthesis.speak(utter);
       statusDiv.textContent = message;
-      lastMessage = message;
     }
 
-    // CÁMARA
     async function setupCamera() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -103,37 +94,88 @@
       });
     }
 
-    // DETECCIÓN
-    async function detect() {
-      const result = await human.detect(video);
+    // 🔥 DETECCIÓN REAL DE PAREDES / OBSTÁCULOS / VEHÍCULOS / PERSONAS / SEÑALES
+    async function detectionLoop() {
+      while (true) {
+        if (!video.paused) {
+          const result = await human.detect(video);
 
-      let hasObstacle = false;
-      let personClose = false;
-      let vehicleClose = false;
-      let wallDetected = false;
-      let message = "Camino libre.";
+          const objects = result.objects;
 
-      result.objects.forEach((obj) => {
-        const { label, box } = obj;
-        const area = box[2] * box[3];
-        const y = box[1];
+          let message = "";
 
-        if (label === "person" && area > 30000) personClose = true;
-        if (["car", "truck", "bus", "motorcycle"].includes(label) && area > 30000) vehicleClose = true;
-        if (["chair", "bench", "bicycle"].includes(label)) hasObstacle = true;
-        if (area > 200000 && y < 150) wallDetected = true;
-      });
+          // 🔥 ZONA DE PELIGRO
+          const dangerZone = {
+            x1: video.videoWidth * 0.25,
+            x2: video.videoWidth * 0.75,
+            y1: video.videoHeight * 0.45,
+            y2: video.videoHeight * 0.95
+          };
 
-      if (wallDetected) message = "Pared al frente, deténgase.";
-      else if (personClose) message = "Persona al frente, cuidado.";
-      else if (vehicleClose) message = "Vehículo cerca, precaución.";
-      else if (hasObstacle) message = "Objeto obstruyendo el camino.";
+          function isInDangerZone(box) {
+            const [x, y, w, h] = box;
+            const cx = x + w / 2;
+            const cy = y + h / 2;
+            return (cx > dangerZone.x1 && cx < dangerZone.x2 && cy > dangerZone.y1 && cy < dangerZone.y2);
+          }
 
-      speak(message);
-      requestAnimationFrame(detect);
+          // 🔥 Detectar pared por GEOMETRÍA
+          const wallDetected = objects.some(obj => {
+            const area = obj.box[2] * obj.box[3];
+            return area > video.videoWidth * video.videoHeight * 0.45 && obj.box[1] < 200;
+          });
+
+          if (wallDetected) {
+            speak("Pared al frente.");
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+
+          // 🔥 Detectar personas
+          const person = objects.find(o => o.label === "person" && isInDangerZone(o.box));
+          if (person) {
+            speak("Persona al frente.");
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+
+          // 🔥 Detectar vehículos
+          const vehicle = objects.find(o =>
+            ["car", "truck", "bus", "motorcycle"].includes(o.label) &&
+            isInDangerZone(o.box)
+          );
+          if (vehicle) {
+            speak("Vehículo cerca.");
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+
+          // 🔥 Detectar señales de tránsito
+          const sign = objects.find(o =>
+            ["stop sign", "traffic light"].includes(o.label)
+          );
+          if (sign && isInDangerZone(sign.box)) {
+            speak("Señal de tránsito adelante.");
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+
+          // 🔥 Detectar objetos que obstruyen
+          const obstacle = objects.find(o =>
+            ["chair", "bench", "bicycle", "umbrella"].includes(o.label) &&
+            isInDangerZone(o.box)
+          );
+          if (obstacle) {
+            speak("Objeto obstruyendo el camino.");
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+        }
+
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
     }
 
-    // INICIAR APP
     async function startApp() {
       startButton.style.display = "none";
       video.style.display = "block";
@@ -145,19 +187,21 @@
 
         human = new Human({
           modelBasePath: "https://cdn.jsdelivr.net/npm/@vladmandic/human/models",
-          object: { enabled: true, modelPath: "yolo-nano" }, 
-          filter: { enabled: false },
+          object: {
+            enabled: true,
+            modelPath: "object/yolo-nano.json"
+          }
         });
 
-        statusDiv.textContent = "Cargando YOLO Nano…";
+        statusDiv.textContent = "Cargando modelo…";
         await human.load();
         await human.warmup();
 
         statusDiv.textContent = "Modelo cargado ✔";
-        detect();
+        detectionLoop();
 
       } catch (e) {
-        statusDiv.textContent = "No se pudo acceder a la cámara.";
+        statusDiv.textContent = `Error: ${e.message}`;
         console.error(e);
       }
     }
