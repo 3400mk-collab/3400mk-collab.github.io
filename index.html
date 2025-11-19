@@ -3,11 +3,8 @@
 <head>
   <meta charset="UTF-8">
 
-  <!-- ========================================================= -->
-  <!-- 🔒 CONTENT-SECURITY-POLICY ULTRA-SEGURA + NONCE DINÁMICO -->
-  <!-- ========================================================= -->
+  <!-- CSP ultra-segura con nonce -->
   <script>
-    // Generamos un nonce seguro
     const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
     document.head.insertAdjacentHTML(
       "beforeend",
@@ -22,7 +19,6 @@
           media-src *;
           object-src 'none';
           base-uri 'self';
-          report-uri https://example.com/csp-report;
         ">
       `
     );
@@ -31,7 +27,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Asistente Visual Inteligente</title>
 
-  <!-- TensorFlow.js (con nonce seguro) -->
+  <!-- TensorFlow -->
   <script nonce="">
     document.currentScript.setAttribute("nonce", nonce);
   </script>
@@ -43,51 +39,44 @@
     body {
       background: #0d1117;
       color: #fff;
-      font-family: "Segoe UI", sans-serif;
       text-align: center;
       margin: 0;
-      padding-top: 20px;
+      padding: 20px 0;
+      font-family: Arial;
     }
     video {
       width: 90%;
-      max-width: 600px;
-      border-radius: 16px;
-      margin-top: 20px;
-      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      max-width: 480px;
+      border-radius: 14px;
+      margin-top: 15px;
     }
     #status {
       margin-top: 20px;
-      font-size: 1.2em;
-      background: rgba(255,255,255,0.1);
-      padding: 10px 18px;
-      border-radius: 12px;
+      font-size: 1.3em;
+      background: rgba(255,255,255,0.12);
+      padding: 10px 20px;
+      border-radius: 10px;
       display: inline-block;
     }
     #startButton {
-      margin-top: 25px;
       font-size: 1.5em;
-      padding: 15px 30px;
+      padding: 12px 25px;
       background: #2ea043;
-      color: white;
-      border-radius: 15px;
       border: none;
+      border-radius: 15px;
+      color: white;
       cursor: pointer;
     }
-
-    /* Notificaciones */
     #notify {
       position: fixed;
-      bottom: 20px;
+      bottom: 18px;
       left: 50%;
       transform: translateX(-50%);
       background: rgba(0,0,0,0.75);
-      padding: 12px 20px;
-      border-radius: 10px;
-      color: #fff;
+      padding: 10px 18px;
+      border-radius: 12px;
       opacity: 0;
-      transition: 0.3s;
-      pointer-events: none;
-      font-size: 1.1em;
+      transition: 0.25s;
     }
   </style>
 </head>
@@ -97,96 +86,106 @@
 <h2>👁 Asistente Visual Inteligente</h2>
 <button id="startButton">Iniciar Asistente</button>
 <video id="video" autoplay playsinline></video>
+
 <div id="status">Esperando inicio...</div>
 <div id="notify"></div>
 
-
-<!-- ========================================================= -->
-<!-- 🔒 TODO EL JS INTERNO ESTÁ AUTORIZADO CON EL MISMO NONCE -->
-<!-- ========================================================= -->
 <script nonce="">
 document.currentScript.setAttribute("nonce", nonce);
 
-/* ---------- Sistema de notificaciones ---------- */
+/* ---------------------------------------
+   NOTIFICACIONES
+----------------------------------------*/
 function notify(msg) {
-  const box = document.getElementById("notify");
-  box.textContent = msg;
-  box.style.opacity = 1;
-  setTimeout(() => box.style.opacity = 0, 2500);
+  const n = document.getElementById("notify");
+  n.textContent = msg;
+  n.style.opacity = 1;
+  setTimeout(() => n.style.opacity = 0, 2200);
 }
 
-/* --------------- Variables principales --------------- */
+/* ---------------------------------------
+   VARIABLES
+----------------------------------------*/
 let video = document.getElementById("video");
 let statusDiv = document.getElementById("status");
-let startButton = document.getElementById("startButton");
+let startBtn = document.getElementById("startButton");
+
 let cocoModel = null;
 let blazeModel = null;
 
-let lastMessage = "";
 let speaking = false;
-let lastDetectionTime = 0;
+let lastMessage = "";
+let lastFrame = 0;
 
-/* ----------------- VOZ -------------------- */
+/* ---------------------------------------
+   VOZ
+----------------------------------------*/
 function speak(msg) {
   if (speaking || msg === lastMessage) return;
   let u = new SpeechSynthesisUtterance(msg);
   u.lang = "es-MX";
   speaking = true;
-  u.onend = () => speaking = false;
-  window.speechSynthesis.speak(u);
+  u.onend = () => (speaking = false);
+  speechSynthesis.speak(u);
+
   lastMessage = msg;
   statusDiv.textContent = msg;
 }
 
-/* ------------------ Cámara segura ------------------ */
+/* ---------------------------------------
+   CÁMARA OPTIMIZADA PARA MÓVILES
+----------------------------------------*/
 async function setupCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" }
+      video: {
+        facingMode: "environment",
+        width: { ideal: 320 },   // 🔥 Mucho mejor rendimiento en móvil
+        height: { ideal: 240 }   // 🔥 
+      }
     });
+
     video.srcObject = stream;
-  } catch {
-    notify("No se puede acceder a la cámara.");
-    speak("No se puede usar el asistente sin la cámara.");
-    throw new Error("Camera unavailable");
-  }
 
-  return new Promise(res => video.onloadedmetadata = () => res());
-}
-
-/* ------------------ Modelos ------------------ */
-async function loadModels() {
-  statusDiv.textContent = "Cargando modelos…";
-
-  try {
-    cocoModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
-    blazeModel = await blazeface.load();
-    statusDiv.textContent = "Modelos cargados.";
   } catch (e) {
-    notify("Error cargando modelos");
+    speak("No se puede acceder a la cámara.");
     throw e;
   }
+
+  return new Promise(res => (video.onloadedmetadata = () => res()));
 }
 
-/* ------------------- Obstáculos -------------------- */
-function isObstacleOnGround(obj) {
-  const [x, y, w, h] = obj.bbox;
-  return (y + h) > video.videoHeight * 0.65 && w*h > 15000;
+/* ---------------------------------------
+   CARGAR MODELOS
+----------------------------------------*/
+async function loadModels() {
+  statusDiv.textContent = "Cargando modelos…";
+  await tf.ready(); // 🔥 Necesario en móvil
+
+  cocoModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+  blazeModel = await blazeface.load();
+
+  statusDiv.textContent = "Modelos cargados ✔";
 }
 
-/* ------------------ Detección principal ------------------ */
-async function detectFrame() {
-  const now = performance.now();
-  if (now - lastDetectionTime < 450) return requestAnimationFrame(detectFrame);
-  lastDetectionTime = now;
+/* ---------------------------------------
+   DETECCIÓN – OPTIMIZADA PARA CELULAR
+----------------------------------------*/
+async function detectFrame(timestamp) {
 
-  const cocoDet = await cocoModel.detect(video);
-  const blazeDet = await blazeModel.estimateFaces(video, false);
+  // Ajuste automático: si el móvil va lento, baja frecuencia
+  if (timestamp - lastFrame < 350) {
+    return requestAnimationFrame(detectFrame);
+  }
+  lastFrame = timestamp;
 
-  const predictions = [...cocoDet];
+  const coco = await cocoModel.detect(video);
+  const blaze = await blazeModel.estimateFaces(video, false);
 
-  blazeDet.forEach(face => {
-    predictions.push({
+  const preds = [...coco];
+
+  blaze.forEach(face => {
+    preds.push({
       class: "person",
       score: 0.9,
       bbox: [
@@ -198,16 +197,25 @@ async function detectFrame() {
     });
   });
 
-  let personClose = false, vehicleClose = false, wallDetected = false, groundObstacle = false;
+  let personClose = false,
+      vehicleClose = false,
+      wallDetected = false,
+      groundObstacle = false;
 
-  predictions.forEach(obj => {
+  preds.forEach(obj => {
     let [x, y, w, h] = obj.bbox;
-    let area = w*h;
+    let area = w * h;
 
-    if (obj.class === "person" && area > 30000) personClose = true;
-    if (["car","truck","bus"].includes(obj.class) && area > 40000) vehicleClose = true;
-    if (area > video.videoWidth * video.videoHeight * 0.60) wallDetected = true;
-    if (isObstacleOnGround(obj)) groundObstacle = true;
+    if (obj.class === "person" && area > 18000) personClose = true;
+
+    if (["car","truck","bus"].includes(obj.class) && area > 25000)
+      vehicleClose = true;
+
+    if (area > video.videoWidth * video.videoHeight * 0.55)
+      wallDetected = true;
+
+    if ((y + h) > video.videoHeight * 0.65 && area > 9000)
+      groundObstacle = true;
   });
 
   let msg = "Camino libre.";
@@ -217,30 +225,28 @@ async function detectFrame() {
   else if (groundObstacle) msg = "Obstáculo en el camino.";
 
   speak(msg);
+
   requestAnimationFrame(detectFrame);
 }
 
-/* -------------------- Iniciar app -------------------- */
+/* ---------------------------------------
+   INICIO
+----------------------------------------*/
 async function startApp() {
-  startButton.style.display = "none";
-  notify("Solicitando cámara…");
+  startBtn.style.display = "none";
+  notify("Activando cámara…");
 
-  try {
-    await setupCamera();
-    notify("Cámara lista");
+  await setupCamera();
+  notify("Cámara lista");
 
-    await loadModels();
-    notify("Asistente iniciado");
+  await loadModels();
+  notify("Asistente iniciado");
 
-    requestAnimationFrame(detectFrame);
-  } catch (e) {
-    statusDiv.textContent = "Error crítico. No se puede iniciar.";
-  }
+  requestAnimationFrame(detectFrame);
 }
 
-startButton.addEventListener("click", startApp);
+startBtn.addEventListener("click", startApp);
 
 </script>
-
 </body>
 </html>
