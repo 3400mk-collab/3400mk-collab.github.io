@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
 
-  <!-- CSP ultra-segura con nonce -->
+  <!-- CSP segura con nonce -->
   <script>
     const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
     document.head.insertAdjacentHTML(
@@ -31,6 +31,7 @@
   <script nonce="">
     document.currentScript.setAttribute("nonce", nonce);
   </script>
+
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0" nonce=""></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd" nonce=""></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface" nonce=""></script>
@@ -122,10 +123,15 @@ let lastFrame = 0;
 ----------------------------------------*/
 function speak(msg) {
   if (speaking || msg === lastMessage) return;
+
   let u = new SpeechSynthesisUtterance(msg);
   u.lang = "es-MX";
+
   speaking = true;
   u.onend = () => (speaking = false);
+
+  // evitar bloqueos en móvil
+  speechSynthesis.cancel();
   speechSynthesis.speak(u);
 
   lastMessage = msg;
@@ -133,15 +139,15 @@ function speak(msg) {
 }
 
 /* ---------------------------------------
-   CÁMARA OPTIMIZADA PARA MÓVILES
+   CÁMARA
 ----------------------------------------*/
 async function setupCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: "environment",
-        width: { ideal: 320 },   // 🔥 Mucho mejor rendimiento en móvil
-        height: { ideal: 240 }   // 🔥 
+        width: { ideal: 320 },
+        height: { ideal: 240 }
       }
     });
 
@@ -156,11 +162,12 @@ async function setupCamera() {
 }
 
 /* ---------------------------------------
-   CARGAR MODELOS
+   CARGA DE MODELOS
 ----------------------------------------*/
 async function loadModels() {
   statusDiv.textContent = "Cargando modelos…";
-  await tf.ready(); // 🔥 Necesario en móvil
+
+  await tf.ready();
 
   cocoModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
   blazeModel = await blazeface.load();
@@ -169,12 +176,12 @@ async function loadModels() {
 }
 
 /* ---------------------------------------
-   DETECCIÓN – OPTIMIZADA PARA CELULAR
+   DETECCIÓN
 ----------------------------------------*/
 async function detectFrame(timestamp) {
 
-  // Ajuste automático: si el móvil va lento, baja frecuencia
-  if (timestamp - lastFrame < 350) {
+  // MISMA LÓGICA, solo más ligera
+  if (timestamp - lastFrame < 300) {
     return requestAnimationFrame(detectFrame);
   }
   lastFrame = timestamp;
