@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
 
-  <!-- CSP ultra-segura con nonce (igual que tenías) -->
+  <!-- CSP ultra-segura corregida -->
   <script>
     const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
     document.head.insertAdjacentHTML(
@@ -17,6 +17,7 @@
           connect-src *;
           frame-ancestors 'none';
           media-src *;
+          worker-src 'self' blob:;
           object-src 'none';
           base-uri 'self';
         ">
@@ -31,7 +32,13 @@
   <script nonce="">
     document.currentScript.setAttribute("nonce", nonce);
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0" nonce=""></script>
+
+  <!-- CORRECCIÓN: agregado tfjs-core y backend-webgl EXPRESAMENTE → reduce lag -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0" nonce=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0" nonce=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0" nonce=""></script>
+
+  <!-- Modelos -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd" nonce=""></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface" nonce=""></script>
 
@@ -113,12 +120,12 @@ let speaking = false;
 let lastMessage = "";
 let lastFrame = 0;
 
-/* ---------- VOZ (idéntica a la tuya pero con cancel para evitar colas) ---------- */
+/* ---------- VOZ ---------- */
 function speak(msg) {
   if (!msg) return;
-  if (msg === lastMessage) return; // no repetir exactamente el mismo mensaje
+  if (msg === lastMessage) return;
   try {
-    speechSynthesis.cancel(); // evitar acumulación en móviles
+    speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(msg);
     u.lang = "es-MX";
     speaking = true;
@@ -131,7 +138,7 @@ function speak(msg) {
   }
 }
 
-/* ---------- Cámara (igual) ---------- */
+/* ---------- Cámara ---------- */
 async function setupCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -147,67 +154,48 @@ async function setupCamera() {
     notify("No se puede acceder a la cámara.");
     throw e;
   }
-
   return new Promise(res => video.onloadedmetadata = () => res());
 }
 
-/* ---------- Cargar modelos (igual) ---------- */
+/* ---------- Modelos + BACKEND WebGL ---------- */
 async function loadModels() {
   statusDiv.textContent = "Cargando modelos…";
+
+  /** CORRECCIÓN: ahora sí activa WebGL antes de cargar modelos */
+  await tf.setBackend("webgl");
   await tf.ready();
+
   cocoModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
   blazeModel = await blazeface.load();
+
   statusDiv.textContent = "Modelos cargados ✔";
 }
 
-/* ---------- FILTRADO TEMPORAL (histeresis) ---------- */
-/*
-  Básico, y efectivo:
-  - mantenemos contadores para cada condición
-  - incrementan cuando condición presente, decrementan cuando no
-  - sólo consideramos una condición "activa" si su contador >= THRESH_GO
-  - usamos THRESH_OFF para evitar conmutaciones frecuentes (histeresis)
-*/
+/* ---------- Histeresis ---------- */
 const COUNTER_MAX = 6;
-const THRESH_GO = 3;   // cuántos frames consecutivos para activar
-const THRESH_OFF = 1;  // cuántos frames sin detección para desactivar
+const THRESH_GO = 2;
+let personCount = 0, vehicleCount = 0, wallCount = 0, groundCount = 0;
 
-let personCount = 0;
-let vehicleCount = 0;
-let wallCount = 0;
-let groundCount = 0;
-
-/* ---------- Funciones de ayuda ---------- */
 function clamp(n, min=0, max=COUNTER_MAX){ return Math.max(min, Math.min(max, n)); }
 
 function isObstacleOnGroundAdaptive(obj, vw, vh) {
-  // hacemos umbral relativo al área del frame y tamaño del objeto
   const [x,y,w,h] = obj.bbox;
   const area = w*h;
-  // zona inferior: 60%..100% de la altura es "suelo"
   const bottom = y + h;
   const groundZone = vh * 0.65;
-  return bottom > groundZone && area > (vw*vh*0.02); // 2% del frame
+  return bottom > groundZone && area > (vw*vh*0.015);
 }
 
-/* ---------- DETECCIÓN PRINCIPAL (misma lógica, con smoothing) ---------- */
-async function detectFrame(timestamp) {
-  // tasa de detección controlada para móviles
-  if (timestamp - lastFrame < 320) { // ~3 FPS (ajustable)
-    return requestAnimationFrame(detectFrame);
-  }
-  lastFrame = timestamp;
+/* ---------- Detección ---------- */
+async function detectFrame(ts) {
+  if (ts - lastFrame < 200) return requestAnimationFrame(detectFrame);
+  lastFrame = ts;
 
-  // si modelos no listos, volver a planificar
-  if (!cocoModel || !blazeModel) {
-    return requestAnimationFrame(detectFrame);
-  }
+  if (!cocoModel || !blazeModel) return requestAnimationFrame(detectFrame);
 
-  // detecciones
   const cocoDet = await cocoModel.detect(video);
   const blazeDet = await blazeModel.estimateFaces(video, false);
 
-  // mezcla resultados (igual que antes)
   const preds = [...cocoDet];
   blazeDet.forEach(face => {
     preds.push({
@@ -222,54 +210,43 @@ async function detectFrame(timestamp) {
     });
   });
 
-  // dimensiones de video para umbrales adaptativos
-  const vw = video.videoWidth || 320;
-  const vh = video.videoHeight || 240;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
 
-  // condiciones actuales (frame actual)
-  let personPresent = false;
-  let vehiclePresent = false;
-  let wallPresent = false;
-  let groundPresent = false;
+  let person = false, vehicle = false, wall = false, ground = false;
 
-  // lógica original (no modificada) — pero usamos umbrales adaptativos y contadores
   for (const obj of preds) {
     const [x,y,w,h] = obj.bbox;
     const area = w*h;
 
-    if (obj.class === "person" && area > Math.max(18000, vw*vh*0.02)) personPresent = true;
-    if (["car","truck","bus"].includes(obj.class) && area > Math.max(25000, vw*vh*0.03)) vehiclePresent = true;
-    if (area > vw * vh * 0.55) wallPresent = true;
-    if (isObstacleOnGroundAdaptive(obj, vw, vh)) groundPresent = true;
+    if (obj.class === "person" && area > vw*vh*0.02) person = true;
+    if (["car","truck","bus","motorcycle","bicycle"].includes(obj.class) && area > vw*vh*0.03) vehicle = true;
+    if (area > vw*vh*0.55) wall = true;
+    if (isObstacleOnGroundAdaptive(obj, vw, vh)) ground = true;
   }
 
-  // actualizar contadores con smoothing/histeresis
-  personCount = clamp(personPresent ? personCount + 1 : personCount - 1);
-  vehicleCount = clamp(vehiclePresent ? vehicleCount + 1 : vehicleCount - 1);
-  wallCount = clamp(wallPresent ? wallCount + 1 : wallCount - 1);
-  groundCount = clamp(groundPresent ? groundCount + 1 : groundCount - 1);
+  personCount = clamp(person ? personCount + 1 : personCount - 1);
+  vehicleCount = clamp(vehicle ? vehicleCount + 1 : vehicleCount - 1);
+  wallCount = clamp(wall ? wallCount + 1 : wallCount - 1);
+  groundCount = clamp(ground ? groundCount + 1 : groundCount - 1);
 
-  // estados filtrados (solo true si contador >= THRESH_GO)
-  const personStable = personCount >= THRESH_GO;
-  const vehicleStable = vehicleCount >= THRESH_GO;
-  const wallStable = wallCount >= THRESH_GO;
-  const groundStable = groundCount >= THRESH_GO;
+  const pS = personCount >= THRESH_GO;
+  const vS = vehicleCount >= THRESH_GO;
+  const wS = wallCount >= THRESH_GO;
+  const gS = groundCount >= THRESH_GO;
 
-  // prioridad original DE MENSAJES: pared > persona > vehículo > obstáculo > libre
   let msg = "Camino libre.";
-  if (wallStable) msg = "Pared al frente, deténgase.";
-  else if (personStable) msg = "Persona al frente, cuidado.";
-  else if (vehicleStable) msg = "Vehículo cerca, precaución.";
-  else if (groundStable) msg = "Obstáculo en el camino.";
+  if (wS) msg = "Pared al frente, deténgase.";
+  else if (pS) msg = "Persona al frente, cuidado.";
+  else if (vS) msg = "Vehículo cerca, precaución.";
+  else if (gS) msg = "Obstáculo en el camino.";
 
-  // sólo hablar si el mensaje filtrado cambió (evita flip-flops)
   if (msg !== lastMessage) speak(msg);
 
-  // siguiente frame
   requestAnimationFrame(detectFrame);
 }
 
-/* ---------- START ---------- */
+/* ---------- Inicio ---------- */
 async function startApp() {
   startBtn.style.display = "none";
   notify("Activando cámara…");
@@ -281,15 +258,14 @@ async function startApp() {
     await loadModels();
     notify("Asistente iniciado");
 
-    // inicializamos contadores a 0
     personCount = vehicleCount = wallCount = groundCount = 0;
     lastMessage = "";
 
     requestAnimationFrame(detectFrame);
   } catch (e) {
+    statusDiv.textContent = "Error crítico. Revisa permisos.";
+    notify("Error iniciando.");
     console.error(e);
-    statusDiv.textContent = "Error crítico. Revisa permisos y consola.";
-    notify("Error iniciando. Revisa permisos.");
   }
 }
 
