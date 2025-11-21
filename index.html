@@ -2,204 +2,209 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-
-  <!-- CSP ultra-segura corregida -->
-  <script>
-    const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-    document.head.insertAdjacentHTML(
-      "beforeend",
-      `<meta http="Content-Security-Policy"
-        content="
-          default-src 'self';
-          script-src 'self' https://cdn.jsdelivr.net 'nonce-${nonce}';
-          style-src 'self' 'unsafe-inline';
-          img-src 'self' blob: data:;
-          connect-src *;
-          frame-ancestors 'none';
-          media-src *;
-          worker-src 'self' blob:;
-          object-src 'none';
-          base-uri 'self';
-        ">
-      `
-    );
-  </script>
-
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>Asistente Visual Inteligente</title>
 
-  <!-- TensorFlow -->
-  <script nonce="">
-    document.currentScript.setAttribute("nonce", nonce);
-  </script>
+  <!--
+    CSP práctica para permitir TFJS y ejecución inline en GitHub Pages.
+    Incluye 'unsafe-inline' y 'unsafe-eval' porque TFJS y algunos CDNs usan eval().
+    Si luego quieres endurecer la CSP, lo hacemos moviendo scripts a archivos externos.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' https://cdn.jsdelivr.net https://cdn.jsdelivr.net/npm 'unsafe-inline' 'unsafe-eval';
+    connect-src *;
+    img-src 'self' blob: data:;
+    media-src *;
+    style-src 'self' 'unsafe-inline';
+    object-src 'none';
+    frame-ancestors 'none';
+  ">
 
-  <!-- CORRECCIÓN: agregado tfjs-core y backend-webgl EXPRESAMENTE → reduce lag -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0" nonce=""></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0" nonce=""></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0" nonce=""></script>
-
-  <!-- Modelos -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd" nonce=""></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface" nonce=""></script>
+  <!-- TFJS + modelos (lite/mobile) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
 
   <style>
-    body {
-      background: #0d1117;
-      color: #fff;
-      text-align: center;
-      margin: 0;
-      padding: 20px 0;
-      font-family: Arial;
+    :root{--green:#2ea043}
+    body{
+      background:#0d1117;color:#fff;font-family:Segoe UI,Arial,sans-serif;
+      margin:0;padding:18px;text-align:center;
     }
-    video {
-      width: 90%;
-      max-width: 480px;
-      border-radius: 14px;
-      margin-top: 15px;
+    h1{margin:6px 0 12px;font-size:1.1rem}
+    #startButton{
+      font-size:1.1rem;padding:10px 22px;background:var(--green);border:none;border-radius:12px;color:#fff;
+      cursor:pointer;
     }
-    #status {
-      margin-top: 20px;
-      font-size: 1.3em;
-      background: rgba(255,255,255,0.12);
-      padding: 10px 20px;
-      border-radius: 10px;
-      display: inline-block;
-    }
-    #startButton {
-      font-size: 1.5em;
-      padding: 12px 25px;
-      background: #2ea043;
-      border: none;
-      border-radius: 15px;
-      color: white;
-      cursor: pointer;
-    }
-    #notify {
-      position: fixed;
-      bottom: 18px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0,0,0,0.75);
-      padding: 10px 18px;
-      border-radius: 12px;
-      opacity: 0;
-      transition: 0.25s;
-    }
+    video{width:90%;max-width:480px;border-radius:12px;margin-top:12px;background:#000}
+    #status{margin-top:12px;display:inline-block;background:rgba(255,255,255,.08);padding:10px 14px;border-radius:10px}
+    #notify{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;background:rgba(0,0,0,.75);padding:8px 12px;border-radius:10px;opacity:0;transition:.25s;color:#fff}
   </style>
 </head>
-
 <body>
+  <h1>👁 Asistente Visual Inteligente</h1>
+  <button id="startButton">Iniciar Asistente</button>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="status">Esperando inicio...</div>
+  <div id="notify"></div>
 
-<h2>👁 Asistente Visual Inteligente</h2>
-<button id="startButton">Iniciar Asistente</button>
-<video id="video" autoplay playsinline></video>
+<script>
+/* -------------------------
+   Small helpers & UI
+   ------------------------- */
+const startBtn = document.getElementById('startButton');
+const statusDiv = document.getElementById('status');
+const notifyBox = document.getElementById('notify');
+const video = document.getElementById('video');
 
-<div id="status">Esperando inicio...</div>
-<div id="notify"></div>
-
-<script nonce="">
-document.currentScript.setAttribute("nonce", nonce);
-
-/* ---------- UI Utils ---------- */
-function notify(msg) {
-  const n = document.getElementById("notify");
-  n.textContent = msg;
-  n.style.opacity = 1;
-  setTimeout(() => n.style.opacity = 0, 2200);
+function notify(msg){
+  notifyBox.textContent = msg;
+  notifyBox.style.opacity = 1;
+  setTimeout(()=> notifyBox.style.opacity = 0, 2200);
 }
 
-/* ---------- Variables ---------- */
-let video = document.getElementById("video");
-let statusDiv = document.getElementById("status");
-let startBtn = document.getElementById("startButton");
-
+/* -------------------------
+   State
+   ------------------------- */
 let cocoModel = null;
 let blazeModel = null;
-
-let speaking = false;
 let lastMessage = "";
-let lastFrame = 0;
+let speaking = false;
+let lastFrameTime = 0;
 
-/* ---------- VOZ ---------- */
-function speak(msg) {
-  if (!msg) return;
-  if (msg === lastMessage) return;
+/* Hysteresis counters to avoid flip-flop messages */
+const COUNTER_MAX = 6;
+const THRESH_GO = 3;
+let personCnt = 0, vehicleCnt = 0, wallCnt = 0, groundCnt = 0;
+
+/* -------------------------
+   TTS - optimized for mobile
+   ------------------------- */
+function speak(msg){
+  if(!msg) return;
+  // If same message is active and TTS is speaking, don't queue duplicates
+  if(msg === lastMessage && speechSynthesis.speaking) return;
   try {
-    speechSynthesis.cancel();
+    // cancel queued utterances to reduce latency/backlog on mobile
+    if(window.speechSynthesis && window.speechSynthesis.speaking){
+      window.speechSynthesis.cancel();
+    }
     const u = new SpeechSynthesisUtterance(msg);
-    u.lang = "es-MX";
+    u.lang = 'es-MX';
+    u.onend = ()=> { speaking = false; };
     speaking = true;
-    u.onend = () => { speaking = false; };
-    speechSynthesis.speak(u);
+    window.speechSynthesis.speak(u);
     lastMessage = msg;
     statusDiv.textContent = msg;
   } catch (e) {
-    console.warn("TTS error:", e);
+    console.warn('TTS error', e);
   }
 }
 
-/* ---------- Cámara ---------- */
-async function setupCamera() {
+/* -------------------------
+   Camera setup (mobile-friendly)
+   ------------------------- */
+async function setupCamera(){
+  const constraints = {
+    audio: false,
+    video: {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 320 },
+      height: { ideal: 240 },
+      frameRate: { ideal: 15, max: 20 }
+    }
+  };
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "environment",
-        width: { ideal: 320 },
-        height: { ideal: 240 }
-      }
-    });
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
-  } catch (e) {
-    speak("No se puede acceder a la cámara.");
-    notify("No se puede acceder a la cámara.");
+    video.muted = true; // allows autoplay in some mobiles
+    await new Promise((res) => video.onloadedmetadata = res);
+    // ensure play
+    try { await video.play(); } catch(e){ /* ignore */ }
+  } catch (err) {
+    notify('No se puede acceder a la cámara.');
+    speak('No se puede usar el asistente sin acceso a la cámara.');
+    throw err;
+  }
+}
+
+/* -------------------------
+   Load models (lite/mobile), force WebGL backend when possible
+   ------------------------- */
+async function loadModels(){
+  statusDiv.textContent = 'Cargando modelos...';
+  notify('Cargando modelos...');
+  try {
+    if (tf && tf.setBackend) {
+      try {
+        await tf.setBackend('webgl');
+      } catch(e){
+        // ignore backend error, tfjs will fallback
+        console.warn('Falló setBackend webgl', e);
+      }
+    }
+    if(tf && tf.ready) await tf.ready();
+
+    // COCO-SSD lite (mobile)
+    cocoModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    // BlazeFace to help detect persons (adds robustness)
+    blazeModel = await blazeface.load();
+
+    statusDiv.textContent = 'Modelos cargados ✔';
+    notify('Modelos listos');
+  } catch(e){
+    console.error('Error cargando modelos', e);
+    statusDiv.textContent = 'Error cargando modelos';
+    notify('Error cargando modelos (revisa consola)');
     throw e;
   }
-  return new Promise(res => video.onloadedmetadata = () => res());
 }
 
-/* ---------- Modelos + BACKEND WebGL ---------- */
-async function loadModels() {
-  statusDiv.textContent = "Cargando modelos…";
-
-  /** CORRECCIÓN: ahora sí activa WebGL antes de cargar modelos */
-  await tf.setBackend("webgl");
-  await tf.ready();
-
-  cocoModel = await cocoSsd.load({ base: "lite_mobilenet_v2" });
-  blazeModel = await blazeface.load();
-
-  statusDiv.textContent = "Modelos cargados ✔";
-}
-
-/* ---------- Histeresis ---------- */
-const COUNTER_MAX = 6;
-const THRESH_GO = 2;
-let personCount = 0, vehicleCount = 0, wallCount = 0, groundCount = 0;
-
+/* -------------------------
+   Helpers: smoothing thresholds
+   ------------------------- */
 function clamp(n, min=0, max=COUNTER_MAX){ return Math.max(min, Math.min(max, n)); }
-
-function isObstacleOnGroundAdaptive(obj, vw, vh) {
+function isObstacleOnGroundAdaptive(obj, vw, vh){
+  // obj.bbox = [x,y,w,h]
   const [x,y,w,h] = obj.bbox;
   const area = w*h;
   const bottom = y + h;
   const groundZone = vh * 0.65;
-  return bottom > groundZone && area > (vw*vh*0.015);
+  // threshold relative to frame area (2% default)
+  return bottom > groundZone && area > (vw*vh*0.02);
 }
 
-/* ---------- Detección ---------- */
-async function detectFrame(ts) {
-  if (ts - lastFrame < 200) return requestAnimationFrame(detectFrame);
-  lastFrame = ts;
+/* -------------------------
+   Main detection loop (optimized)
+   - rate-limited
+   - combines coco + blazeface
+   - smoothing / hysteresis to avoid flips
+   ------------------------- */
+async function detectLoop(ts){
+  // Rate control: aim ~3 FPS on slow devices (adjustable)
+  if(!ts) ts = performance.now();
+  if(ts - lastFrameTime < 300) return requestAnimationFrame(detectLoop);
+  lastFrameTime = ts;
 
-  if (!cocoModel || !blazeModel) return requestAnimationFrame(detectFrame);
+  if(!cocoModel || !blazeModel){
+    return requestAnimationFrame(detectLoop);
+  }
 
-  const cocoDet = await cocoModel.detect(video);
-  const blazeDet = await blazeModel.estimateFaces(video, false);
+  let cocoDet = [], blazeDet = [];
+  try {
+    cocoDet = await cocoModel.detect(video);
+    blazeDet = await blazeModel.estimateFaces(video, false);
+  } catch(e){
+    console.warn('Error en detect():', e);
+    return requestAnimationFrame(detectLoop);
+  }
 
+  // combine predictions
   const preds = [...cocoDet];
   blazeDet.forEach(face => {
     preds.push({
-      class: "person",
+      class: 'person',
       score: 0.9,
       bbox: [
         face.topLeft[0],
@@ -210,66 +215,83 @@ async function detectFrame(ts) {
     });
   });
 
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+  const vw = video.videoWidth || 320;
+  const vh = video.videoHeight || 240;
 
-  let person = false, vehicle = false, wall = false, ground = false;
+  // current frame booleans
+  let personPresent = false, vehiclePresent = false, wallPresent = false, groundPresent = false;
 
-  for (const obj of preds) {
+  for(const obj of preds){
     const [x,y,w,h] = obj.bbox;
     const area = w*h;
 
-    if (obj.class === "person" && area > vw*vh*0.02) person = true;
-    if (["car","truck","bus","motorcycle","bicycle"].includes(obj.class) && area > vw*vh*0.03) vehicle = true;
-    if (area > vw*vh*0.55) wall = true;
-    if (isObstacleOnGroundAdaptive(obj, vw, vh)) ground = true;
+    // adaptive thresholds to improve detection robustness on mobile and different cameras
+    if(obj.class === 'person' && area > Math.max(15000, vw*vh*0.015)) personPresent = true;
+    if(['car','truck','bus','motorcycle'].includes(obj.class) && area > Math.max(22000, vw*vh*0.025)) vehiclePresent = true;
+    if(area > vw*vh*0.55) wallPresent = true;
+    if(isObstacleOnGroundAdaptive(obj, vw, vh)) groundPresent = true;
   }
 
-  personCount = clamp(person ? personCount + 1 : personCount - 1);
-  vehicleCount = clamp(vehicle ? vehicleCount + 1 : vehicleCount - 1);
-  wallCount = clamp(wall ? wallCount + 1 : wallCount - 1);
-  groundCount = clamp(ground ? groundCount + 1 : groundCount - 1);
+  // update counters (hysteresis smoothing)
+  personCnt = clamp(personPresent ? personCnt + 1 : personCnt - 1);
+  vehicleCnt = clamp(vehiclePresent ? vehicleCnt + 1 : vehicleCnt - 1);
+  wallCnt = clamp(wallPresent ? wallCnt + 1 : wallCnt - 1);
+  groundCnt = clamp(groundPresent ? groundCnt + 1 : groundCnt - 1);
 
-  const pS = personCount >= THRESH_GO;
-  const vS = vehicleCount >= THRESH_GO;
-  const wS = wallCount >= THRESH_GO;
-  const gS = groundCount >= THRESH_GO;
+  const personStable = personCnt >= THRESH_GO;
+  const vehicleStable = vehicleCnt >= THRESH_GO;
+  const wallStable = wallCnt >= THRESH_GO;
+  const groundStable = groundCnt >= THRESH_GO;
 
-  let msg = "Camino libre.";
-  if (wS) msg = "Pared al frente, deténgase.";
-  else if (pS) msg = "Persona al frente, cuidado.";
-  else if (vS) msg = "Vehículo cerca, precaución.";
-  else if (gS) msg = "Obstáculo en el camino.";
+  // priority: wall > person > vehicle > ground > free
+  let message = 'Camino libre.';
+  if(wallStable) message = 'Pared al frente, deténgase.';
+  else if(personStable) message = 'Persona al frente, cuidado.';
+  else if(vehicleStable) message = 'Vehículo cerca, precaución.';
+  else if(groundStable) message = 'Obstáculo en el camino.';
 
-  if (msg !== lastMessage) speak(msg);
+  // speak only when message changes (reduces chatter)
+  if(message !== lastMessage){
+    speak(message);
+  }
 
-  requestAnimationFrame(detectFrame);
+  requestAnimationFrame(detectLoop);
 }
 
-/* ---------- Inicio ---------- */
-async function startApp() {
-  startBtn.style.display = "none";
-  notify("Activando cámara…");
+/* -------------------------
+   Start app
+   ------------------------- */
+async function startApp(){
+  startBtn.disabled = true;
+  startBtn.style.opacity = '0.6';
+  notify('Solicitando cámara...');
+  statusDiv.textContent = 'Solicitando cámara...';
 
   try {
     await setupCamera();
-    notify("Cámara lista");
+    notify('Cámara activada');
+    statusDiv.textContent = 'Cámara lista';
 
     await loadModels();
-    notify("Asistente iniciado");
 
-    personCount = vehicleCount = wallCount = groundCount = 0;
-    lastMessage = "";
+    // reset counters and state
+    personCnt = vehicleCnt = wallCnt = groundCnt = 0;
+    lastMessage = '';
 
-    requestAnimationFrame(detectFrame);
-  } catch (e) {
-    statusDiv.textContent = "Error crítico. Revisa permisos.";
-    notify("Error iniciando.");
-    console.error(e);
+    notify('Asistente iniciado');
+    statusDiv.textContent = 'Asistente iniciado';
+
+    requestAnimationFrame(detectLoop);
+  } catch(e){
+    console.error('Error iniciando app:', e);
+    statusDiv.textContent = 'Error crítico. Revisa permisos y la consola.';
+    notify('No se pudo iniciar. Revisa permisos/consola.');
+    startBtn.disabled = false;
+    startBtn.style.opacity = '1';
   }
 }
 
-startBtn.addEventListener("click", startApp);
+startBtn.addEventListener('click', startApp);
 </script>
 </body>
 </html>
