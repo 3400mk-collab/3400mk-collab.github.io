@@ -5,11 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>Asistente Visual Inteligente</title>
 
-  <!--
-    CSP práctica para permitir TFJS y ejecución inline en GitHub Pages.
-    Incluye 'unsafe-inline' y 'unsafe-eval' porque TFJS y algunos CDNs usan eval().
-    Si luego quieres endurecer la CSP, lo hacemos moviendo scripts a archivos externos.
-  -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
     script-src 'self' https://cdn.jsdelivr.net https://cdn.jsdelivr.net/npm 'unsafe-inline' 'unsafe-eval';
@@ -21,7 +16,6 @@
     frame-ancestors 'none';
   ">
 
-  <!-- TFJS + modelos (lite/mobile) -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
@@ -50,9 +44,6 @@
   <div id="notify"></div>
 
 <script>
-/* -------------------------
-   Small helpers & UI
-   ------------------------- */
 const startBtn = document.getElementById('startButton');
 const statusDiv = document.getElementById('status');
 const notifyBox = document.getElementById('notify');
@@ -64,193 +55,162 @@ function notify(msg){
   setTimeout(()=> notifyBox.style.opacity = 0, 2200);
 }
 
-/* -------------------------
-   State
-   ------------------------- */
+/* -------- State ---------- */
 let cocoModel = null;
 let blazeModel = null;
 let lastMessage = "";
 let speaking = false;
 let lastFrameTime = 0;
 
-/* Hysteresis counters to avoid flip-flop messages */
-const COUNTER_MAX = 6;
-const THRESH_GO = 3;
+/* Hysteresis */
+const COUNTER_MAX = 8;
+const THRESH_GO = 2;
 let personCnt = 0, vehicleCnt = 0, wallCnt = 0, groundCnt = 0;
 
-/* -------------------------
-   TTS - optimized for mobile
-   ------------------------- */
+/* ---------- TTS ----------- */
 function speak(msg){
   if(!msg) return;
-  // If same message is active and TTS is speaking, don't queue duplicates
   if(msg === lastMessage && speechSynthesis.speaking) return;
-  try {
-    // cancel queued utterances to reduce latency/backlog on mobile
-    if(window.speechSynthesis && window.speechSynthesis.speaking){
+
+  try{
+    if(window.speechSynthesis.speaking){
       window.speechSynthesis.cancel();
     }
     const u = new SpeechSynthesisUtterance(msg);
     u.lang = 'es-MX';
-    u.onend = ()=> { speaking = false; };
     speaking = true;
-    window.speechSynthesis.speak(u);
+    u.onend = () => speaking = false;
+    speechSynthesis.speak(u);
     lastMessage = msg;
     statusDiv.textContent = msg;
-  } catch (e) {
-    console.warn('TTS error', e);
-  }
+  }catch(e){ console.warn(e); }
 }
 
-/* -------------------------
-   Camera setup (mobile-friendly)
-   ------------------------- */
+/* ---------- Camera ---------- */
 async function setupCamera(){
   const constraints = {
-    audio: false,
-    video: {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 320 },
-      height: { ideal: 240 },
-      frameRate: { ideal: 15, max: 20 }
+    audio:false,
+    video:{
+      facingMode:{ideal:"environment"},
+      width:{ideal:320},
+      height:{ideal:240},
+      frameRate:{ideal:20, max:24}
     }
   };
-  try {
+
+  try{
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
-    video.muted = true; // allows autoplay in some mobiles
-    await new Promise((res) => video.onloadedmetadata = res);
-    // ensure play
-    try { await video.play(); } catch(e){ /* ignore */ }
-  } catch (err) {
+    await new Promise(res => video.onloadedmetadata = res);
+    await video.play();
+  }catch(err){
     notify('No se puede acceder a la cámara.');
     speak('No se puede usar el asistente sin acceso a la cámara.');
     throw err;
   }
 }
 
-/* -------------------------
-   Load models (lite/mobile), force WebGL backend when possible
-   ------------------------- */
+/* ---------- Models ---------- */
 async function loadModels(){
   statusDiv.textContent = 'Cargando modelos...';
   notify('Cargando modelos...');
-  try {
-    if (tf && tf.setBackend) {
-      try {
-        await tf.setBackend('webgl');
-      } catch(e){
-        // ignore backend error, tfjs will fallback
-        console.warn('Falló setBackend webgl', e);
-      }
-    }
-    if(tf && tf.ready) await tf.ready();
 
-    // COCO-SSD lite (mobile)
-    cocoModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-    // BlazeFace to help detect persons (adds robustness)
+  try{
+    await tf.setBackend('webgl');
+    await tf.ready();
+
+    cocoModel = await cocoSsd.load({ base:'lite_mobilenet_v2' });
     blazeModel = await blazeface.load();
 
     statusDiv.textContent = 'Modelos cargados ✔';
     notify('Modelos listos');
-  } catch(e){
-    console.error('Error cargando modelos', e);
+  }catch(e){
+    console.error(e);
     statusDiv.textContent = 'Error cargando modelos';
-    notify('Error cargando modelos (revisa consola)');
+    notify('Error cargando modelos');
     throw e;
   }
 }
 
-/* -------------------------
-   Helpers: smoothing thresholds
-   ------------------------- */
-function clamp(n, min=0, max=COUNTER_MAX){ return Math.max(min, Math.min(max, n)); }
-function isObstacleOnGroundAdaptive(obj, vw, vh){
-  // obj.bbox = [x,y,w,h]
-  const [x,y,w,h] = obj.bbox;
-  const area = w*h;
-  const bottom = y + h;
-  const groundZone = vh * 0.65;
-  // threshold relative to frame area (2% default)
-  return bottom > groundZone && area > (vw*vh*0.02);
+/* ---------- Logic helpers ---------- */
+function clamp(n,min=0,max=COUNTER_MAX){
+  return Math.max(min, Math.min(max, n));
 }
 
-/* -------------------------
-   Main detection loop (optimized)
-   - rate-limited
-   - combines coco + blazeface
-   - smoothing / hysteresis to avoid flips
-   ------------------------- */
+function isObstacleOnGroundAdaptive(obj,vw,vh){
+  const [x,y,w,h] = obj.bbox;
+  const area = w*h;
+  const bottom = y+h;
+  const groundZone = vh*0.75;
+  return bottom > groundZone && area > vw*vh*0.01;
+}
+
+/* ---------- Detection loop ---------- */
 async function detectLoop(ts){
-  // Rate control: aim ~3 FPS on slow devices (adjustable)
   if(!ts) ts = performance.now();
-  if(ts - lastFrameTime < 300) return requestAnimationFrame(detectLoop);
+
+  // improve FPS → 160ms ≈ 6FPS
+  if(ts - lastFrameTime < 160){
+    return requestAnimationFrame(detectLoop);
+  }
   lastFrameTime = ts;
 
-  if(!cocoModel || !blazeModel){
-    return requestAnimationFrame(detectLoop);
-  }
+  if(!cocoModel || !blazeModel) return requestAnimationFrame(detectLoop);
 
   let cocoDet = [], blazeDet = [];
-  try {
+  try{
     cocoDet = await cocoModel.detect(video);
     blazeDet = await blazeModel.estimateFaces(video, false);
-  } catch(e){
-    console.warn('Error en detect():', e);
+  }catch(e){
+    console.warn('Error detect:', e);
     return requestAnimationFrame(detectLoop);
   }
 
-  // combine predictions
   const preds = [...cocoDet];
-  blazeDet.forEach(face => {
+  blazeDet.forEach(face=>{
     preds.push({
-      class: 'person',
-      score: 0.9,
-      bbox: [
+      class:'person',
+      score:0.9,
+      bbox:[
         face.topLeft[0],
         face.topLeft[1],
-        face.bottomRight[0] - face.topLeft[0],
-        face.bottomRight[1] - face.topLeft[1]
+        face.bottomRight[0]-face.topLeft[0],
+        face.bottomRight[1]-face.topLeft[1]
       ]
     });
   });
 
-  const vw = video.videoWidth || 320;
-  const vh = video.videoHeight || 240;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
 
-  // current frame booleans
-  let personPresent = false, vehiclePresent = false, wallPresent = false, groundPresent = false;
+  let personPresent=false, vehiclePresent=false, wallPresent=false, groundPresent=false;
 
   for(const obj of preds){
     const [x,y,w,h] = obj.bbox;
     const area = w*h;
 
-    // adaptive thresholds to improve detection robustness on mobile and different cameras
-    if(obj.class === 'person' && area > Math.max(15000, vw*vh*0.015)) personPresent = true;
-    if(['car','truck','bus','motorcycle'].includes(obj.class) && area > Math.max(22000, vw*vh*0.025)) vehiclePresent = true;
-    if(area > vw*vh*0.55) wallPresent = true;
-    if(isObstacleOnGroundAdaptive(obj, vw, vh)) groundPresent = true;
+    if(obj.class==='person' && area > vw*vh*0.008) personPresent = true;
+    if(['car','truck','bus','motorcycle'].includes(obj.class) && area>vw*vh*0.015) vehiclePresent = true;
+    if(area > vw*vh*0.30) wallPresent = true;
+    if(isObstacleOnGroundAdaptive(obj,vw,vh)) groundPresent = true;
   }
 
-  // update counters (hysteresis smoothing)
-  personCnt = clamp(personPresent ? personCnt + 1 : personCnt - 1);
-  vehicleCnt = clamp(vehiclePresent ? vehicleCnt + 1 : vehicleCnt - 1);
-  wallCnt = clamp(wallPresent ? wallCnt + 1 : wallCnt - 1);
-  groundCnt = clamp(groundPresent ? groundCnt + 1 : groundCnt - 1);
+  personCnt = clamp(personPresent? personCnt+1 : personCnt-1);
+  vehicleCnt = clamp(vehiclePresent? vehicleCnt+1 : vehicleCnt-1);
+  wallCnt = clamp(wallPresent? wallCnt+1 : wallCnt-1);
+  groundCnt = clamp(groundPresent? groundCnt+1 : groundCnt-1);
 
   const personStable = personCnt >= THRESH_GO;
   const vehicleStable = vehicleCnt >= THRESH_GO;
   const wallStable = wallCnt >= THRESH_GO;
   const groundStable = groundCnt >= THRESH_GO;
 
-  // priority: wall > person > vehicle > ground > free
   let message = 'Camino libre.';
   if(wallStable) message = 'Pared al frente, deténgase.';
   else if(personStable) message = 'Persona al frente, cuidado.';
   else if(vehicleStable) message = 'Vehículo cerca, precaución.';
   else if(groundStable) message = 'Obstáculo en el camino.';
 
-  // speak only when message changes (reduces chatter)
   if(message !== lastMessage){
     speak(message);
   }
@@ -258,36 +218,30 @@ async function detectLoop(ts){
   requestAnimationFrame(detectLoop);
 }
 
-/* -------------------------
-   Start app
-   ------------------------- */
+/* ---------- Start ---------- */
 async function startApp(){
   startBtn.disabled = true;
-  startBtn.style.opacity = '0.6';
+  startBtn.style.opacity = "0.6";
+
   notify('Solicitando cámara...');
   statusDiv.textContent = 'Solicitando cámara...';
 
-  try {
+  try{
     await setupCamera();
-    notify('Cámara activada');
-    statusDiv.textContent = 'Cámara lista';
-
     await loadModels();
 
-    // reset counters and state
     personCnt = vehicleCnt = wallCnt = groundCnt = 0;
-    lastMessage = '';
+    lastMessage = "";
 
     notify('Asistente iniciado');
     statusDiv.textContent = 'Asistente iniciado';
 
     requestAnimationFrame(detectLoop);
-  } catch(e){
-    console.error('Error iniciando app:', e);
-    statusDiv.textContent = 'Error crítico. Revisa permisos y la consola.';
-    notify('No se pudo iniciar. Revisa permisos/consola.');
+  }catch(e){
+    statusDiv.textContent = 'Error crítico.';
+    notify('No se pudo iniciar.');
     startBtn.disabled = false;
-    startBtn.style.opacity = '1';
+    startBtn.style.opacity="1";
   }
 }
 
