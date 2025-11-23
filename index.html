@@ -3,9 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>Asistente Visual Inteligente - Optimizado</title>
+  <title>Asistente Visual Inteligente (Opción B - Optimizado)</title>
 
-  <!-- CSP práctica para GitHub Pages (TFJS requiere eval/inline en muchos entornos) -->
+  <!--
+    CSP práctica que permite TFJS en GitHub Pages (TFJS utiliza eval/inline en muchos entornos).
+    Si luego quieres endurecer la CSP, movemos scripts a archivos externos.
+  -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
     script-src 'self' https://cdn.jsdelivr.net https://cdn.jsdelivr.net/npm 'unsafe-inline' 'unsafe-eval';
@@ -17,16 +20,22 @@
     frame-ancestors 'none';
   ">
 
-  <!-- TFJS y modelos (lite/mobile) -->
+  <!-- TFJS + modelos (lite/mobile). -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
 
   <style>
     :root{--green:#2ea043}
-    body{background:#0d1117;color:#fff;font-family:Segoe UI,Arial,sans-serif;margin:0;padding:18px;text-align:center}
+    body{
+      background:#0d1117;color:#fff;font-family:Segoe UI,Arial,sans-serif;
+      margin:0;padding:18px;text-align:center;
+    }
     h1{margin:6px 0 12px;font-size:1.1rem}
-    #startButton{font-size:1.1rem;padding:10px 22px;background:var(--green);border:none;border-radius:12px;color:#fff;cursor:pointer}
+    #startButton{
+      font-size:1.1rem;padding:10px 22px;background:var(--green);border:none;border-radius:12px;color:#fff;
+      cursor:pointer;
+    }
     video{width:90%;max-width:480px;border-radius:12px;margin-top:12px;background:#000}
     #status{margin-top:12px;display:inline-block;background:rgba(255,255,255,.08);padding:10px 14px;border-radius:10px}
     #notify{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;background:rgba(0,0,0,.75);padding:8px 12px;border-radius:10px;opacity:0;transition:.25s;color:#fff}
@@ -34,7 +43,7 @@
   </style>
 </head>
 <body>
-  <h1>👁 Asistente Visual Inteligente (Optimizado)</h1>
+  <h1>👁 Asistente Visual Inteligente (Opción B)</h1>
   <button id="startButton">Iniciar Asistente</button>
   <video id="video" autoplay playsinline muted></video>
   <div id="status">Esperando inicio...</div>
@@ -42,32 +51,35 @@
   <canvas id="debugCanvas"></canvas>
 
 <script>
-/* =====================
-   Optimización y mejoras de detección
-   - No se cambian los modelos ni la lógica principal. Sólo ajustes finos.
-   - Mantiene coco-ssd (lite) + blazeface.
-   - Mejoras: rate-limit, WebGL backend, hysteresis (smoothing), niveles de obstáculo (bajo/medio/alto), TTS mejorado.
-   ===================== */
+/* ============================
+   Opción B - Integración optimizada
+   - Mantiene la LOGICA de detección que solicitaste (niveles bajo/medio/alto).
+   - Mejoras: WebGL backend si está disponible, rate-limit, resolución baja de cámara,
+     TTS cancel/replace para evitar colas, smoothing/hysteresis.
+   - No se cambian umbrales de detección (solo adaptación relativa al frame en algunos casos).
+   ============================ */
 
 const startBtn = document.getElementById('startButton');
 const statusDiv = document.getElementById('status');
 const notifyBox = document.getElementById('notify');
 const video = document.getElementById('video');
 const debugCanvas = document.getElementById('debugCanvas');
-const debugCtx = debugCanvas.getContext && debugCanvas.getContext('2d');
+const debugCtx = (debugCanvas.getContext && debugCanvas.getContext('2d')) || null;
 
 let cocoModel = null;
 let blazeModel = null;
+
 let lastMessage = '';
 let speaking = false;
 let lastFrameTime = 0;
 
-// Hysteresis counters
-const COUNTER_MAX = 8; // ajustar si quieres mayor suavidad
-const THRESH_GO = 2;   // cuántos frames consecutivos para considerar detectado
+// Hysteresis counters (manteniendo tu lógica)
+const COUNTER_MAX = 8;
+const THRESH_GO = 2; // frames consecutivos para considerar detectado
 let personCnt = 0, vehicleCnt = 0, wallCnt = 0, obsLowCnt = 0, obsMidCnt = 0, obsHighCnt = 0;
 
-let DEBUG = false; // cambiar a true para ver cajas de depuración
+// DEBUG: set true para ver canvas de depuración (no activo por defecto)
+let DEBUG = false;
 
 function notify(msg){
   notifyBox.textContent = msg;
@@ -78,28 +90,31 @@ function notify(msg){
 /* ---------------- TTS mejorado (evita colas y reduce latencia) ---------------- */
 function speak(msg){
   if(!msg) return;
-  // no repetir si mismo mensaje y ya se habló
+  // No repetir el mismo mensaje si ya se está hablando
   if(msg === lastMessage && window.speechSynthesis && window.speechSynthesis.speaking) return;
   try{
-    // cancelar cola para reducir retraso acumulado en móviles
-    if(window.speechSynthesis && window.speechSynthesis.speaking) window.speechSynthesis.cancel();
+    if(window.speechSynthesis && window.speechSynthesis.speaking){
+      window.speechSynthesis.cancel(); // evita acumulación y latencia
+    }
     const u = new SpeechSynthesisUtterance(msg);
     u.lang = 'es-MX';
-    u.onend = ()=> { speaking = false; };
     speaking = true;
+    u.onend = ()=> { speaking = false; };
     window.speechSynthesis.speak(u);
     lastMessage = msg;
     statusDiv.textContent = msg;
-  }catch(e){ console.warn('TTS error', e); }
+  }catch(e){
+    console.warn('TTS error', e);
+  }
 }
 
-/* ---------------- Cámara optimizada ---------------- */
+/* ---------------- Cámara optimizada (baja resolución + framerate limitado) ---------------- */
 async function setupCamera(){
   const constraints = {
     audio: false,
     video: {
       facingMode: { ideal: 'environment' },
-      width: { ideal: 320 },
+      width: { ideal: 320 },   // optimizado para móviles
       height: { ideal: 240 },
       frameRate: { ideal: 15, max: 20 }
     }
@@ -107,9 +122,9 @@ async function setupCamera(){
   try{
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
-    video.muted = true; // ayuda al autoplay en móviles
+    video.muted = true; // ayuda con autoplay en móviles
     await new Promise(res => video.onloadedmetadata = res);
-    try{ await video.play(); }catch(e){ /* ignore */ }
+    try { await video.play(); } catch(e){ /* ignora si play falla en algunos navegadores */ }
   }catch(e){
     notify('No se puede acceder a la cámara.');
     speak('No se puede usar el asistente sin acceso a la cámara.');
@@ -117,16 +132,17 @@ async function setupCamera(){
   }
 }
 
-/* ---------------- Cargar modelos + WebGL backend ---------------- */
+/* ---------------- Cargar modelos + forzar backend WebGL cuando sea posible ---------------- */
 async function loadModels(){
   statusDiv.textContent = 'Cargando modelos...';
   notify('Cargando modelos...');
   try{
-    if(tf && tf.setBackend){
-      try{ await tf.setBackend('webgl'); } catch(e){ console.warn('WebGL backend no disponible', e); }
+    if (tf && tf.setBackend){
+      try { await tf.setBackend('webgl'); } catch(e){ console.warn('WebGL backend no disponible', e); }
     }
-    if(tf && tf.ready) await tf.ready();
+    if (tf && tf.ready) await tf.ready();
 
+    // COCO-SSD lite y BlazeFace (misma combinación que funcionó mejor)
     cocoModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
     blazeModel = await blazeface.load();
 
@@ -140,12 +156,11 @@ async function loadModels(){
   }
 }
 
-/* ---------------- Helpers detección niveles obstáculo ---------------- */
+/* ---------------- Helpers detección niveles obstáculo (idéntico al index "mejor detección") ---------------- */
 function clamp(n,min=0,max=COUNTER_MAX){ return Math.max(min, Math.min(max, n)); }
 
 function obstacleLevels(obj, vw, vh){
   // Devuelve {low:bool, mid:bool, high:bool}
-  // Basado en bbox: [x,y,w,h]
   const [x,y,w,h] = obj.bbox;
   const area = w*h;
   const bottom = y + h;
@@ -155,17 +170,17 @@ function obstacleLevels(obj, vw, vh){
   const highZone = vh * 0.25;    // alto
 
   const low = (bottom > lowZone) && (area > (vw*vh*0.008)); // >=0.8% area
-  const mid = ( (y + h/2) > midZoneTop && (y + h/2) <= lowZone ) && (area > (vw*vh*0.008));
+  const mid = ((y + h/2) > midZoneTop && (y + h/2) <= lowZone) && (area > (vw*vh*0.008));
   const high = (y < highZone) && (area > (vw*vh*0.006));
 
   return { low, mid, high };
 }
 
-/* ---------------- Loop principal de detección ---------------- */
+/* ---------------- Main detection loop (B) - usaremos la DETECCIÓN "mejor" exactamente y optimizamos el pipeline ---------------- */
 async function detectLoop(ts){
   if(!ts) ts = performance.now();
 
-  // Rate control: objetivo ~6 FPS (ajustable). Menor = más cpu
+  // Rate control: objetivo ~6 FPS (160ms)
   if(ts - lastFrameTime < 160) return requestAnimationFrame(detectLoop);
   lastFrameTime = ts;
 
@@ -173,6 +188,7 @@ async function detectLoop(ts){
 
   let cocoDet = [], blazeDet = [];
   try{
+    // Llamadas a detect y estimateFaces (pueden lanzar si la cámara cambia)
     cocoDet = await cocoModel.detect(video);
     blazeDet = await blazeModel.estimateFaces(video, false);
   }catch(e){
@@ -180,17 +196,26 @@ async function detectLoop(ts){
     return requestAnimationFrame(detectLoop);
   }
 
-  // Mezcla predicciones
+  // Mezcla predicciones (mantenemos exactamente la lógica de detección que querías)
   const preds = [...cocoDet];
-  blazeDet.forEach(face => preds.push({ class: 'person', score: 0.9, bbox: [ face.topLeft[0], face.topLeft[1], face.bottomRight[0]-face.topLeft[0], face.bottomRight[1]-face.topLeft[1] ] }));
+  blazeDet.forEach(face => preds.push({
+    class: 'person',
+    score: 0.9,
+    bbox: [
+      face.topLeft[0],
+      face.topLeft[1],
+      face.bottomRight[0] - face.topLeft[0],
+      face.bottomRight[1] - face.topLeft[1]
+    ]
+  }));
 
   const vw = video.videoWidth || 320;
   const vh = video.videoHeight || 240;
 
-  // Flags por frame
   let personPresent = false, vehiclePresent = false, wallPresent = false;
   let anyLow=false, anyMid=false, anyHigh=false;
 
+  // Mantén las mismas reglas de umbral que en el index de "mejor detección"
   for(const obj of preds){
     const [x,y,w,h] = obj.bbox;
     const area = w*h;
@@ -198,20 +223,20 @@ async function detectLoop(ts){
     // Personas (umbral adaptativo)
     if(obj.class === 'person' && area > Math.max(10000, vw*vh*0.01)) personPresent = true;
 
-    // Vehículos (auto/moto/bus) — incluye motorcycle/bicycle opcional si quieres
+    // Vehículos
     if(['car','truck','bus','motorcycle'].includes(obj.class) && area > Math.max(18000, vw*vh*0.02)) vehiclePresent = true;
 
-    // Pared: muy grande en pantalla
+    // Pared
     if(area > vw*vh*0.55) wallPresent = true;
 
-    // Niveles de obstáculo: bajo / medio / alto
+    // Niveles de obstáculo
     const levels = obstacleLevels(obj, vw, vh);
     if(levels.low) anyLow = true;
     if(levels.mid) anyMid = true;
     if(levels.high) anyHigh = true;
   }
 
-  // Actualizar contadores con smoothing/hysteresis
+  // Actualizar contadores (smoothing/hysteresis)
   personCnt  = clamp(personPresent  ? personCnt  + 1 : personCnt  - 1);
   vehicleCnt = clamp(vehiclePresent ? vehicleCnt + 1 : vehicleCnt - 1);
   wallCnt    = clamp(wallPresent    ? wallCnt    + 1 : wallCnt    - 1);
@@ -226,7 +251,7 @@ async function detectLoop(ts){
   const midStable     = obsMidCnt  >= THRESH_GO;
   const highStable    = obsHighCnt >= THRESH_GO;
 
-  // Prioridad: pared > persona > vehículo > obstáculo alto>medio>bajo > libre
+  // Prioridad exacta: pared > persona > vehículo > obstáculo alto>medio>bajo > libre
   let message = 'Camino libre.';
   if(wallStable) message = 'Pared al frente, deténgase.';
   else if(personStable) message = 'Persona al frente, cuidado.';
@@ -235,11 +260,12 @@ async function detectLoop(ts){
   else if(midStable) message = 'Objeto a media altura al frente — cuidado.';
   else if(lowStable) message = 'Objeto en el suelo obstruyendo el paso.';
 
+  // Sólo hablar si el mensaje cambió (evita flip-flops)
   if(message !== lastMessage){
     speak(message);
   }
 
-  // Opcional: dibujar cajas pequeñas en canvas de depuración para ajustar umbrales
+  // Debug draw (opcional)
   if(DEBUG && debugCtx){
     debugCanvas.style.display = 'block';
     debugCanvas.width = 320; debugCanvas.height = 240;
@@ -250,6 +276,8 @@ async function detectLoop(ts){
       const [x,y,w,h] = p.bbox;
       debugCtx.strokeRect(x * (debugCanvas.width/vw), y * (debugCanvas.height/vh), w * (debugCanvas.width/vw), h * (debugCanvas.height/vh));
     });
+  } else if(debugCtx) {
+    debugCanvas.style.display = 'none';
   }
 
   requestAnimationFrame(detectLoop);
@@ -257,28 +285,38 @@ async function detectLoop(ts){
 
 /* ---------------- Start app ---------------- */
 async function startApp(){
-  startBtn.disabled = true; startBtn.style.opacity = '0.6';
-  notify('Solicitando cámara...'); statusDiv.textContent = 'Solicitando cámara...';
+  startBtn.disabled = true;
+  startBtn.style.opacity = '0.6';
+  notify('Solicitando cámara...');
+  statusDiv.textContent = 'Solicitando cámara...';
+
   try{
-    await setupCamera(); notify('Cámara activada'); statusDiv.textContent = 'Cámara lista';
+    await setupCamera();
+    notify('Cámara activada');
+    statusDiv.textContent = 'Cámara lista';
+
     await loadModels();
 
-    // reset counters
+    // reset counters & state
     personCnt = vehicleCnt = wallCnt = obsLowCnt = obsMidCnt = obsHighCnt = 0;
     lastMessage = '';
 
-    notify('Asistente iniciado'); statusDiv.textContent = 'Asistente iniciado';
+    notify('Asistente iniciado');
+    statusDiv.textContent = 'Asistente iniciado';
+
+    // inicia loop de detección optimizado
     requestAnimationFrame(detectLoop);
+
   }catch(e){
     console.error('Error iniciando app:', e);
-    statusDiv.textContent = 'Error crítico. Revisa permisos/consola.';
+    statusDiv.textContent = 'Error crítico. Revisa permisos y consola.';
     notify('No se pudo iniciar. Revisa permisos.');
-    startBtn.disabled = false; startBtn.style.opacity = '1';
+    startBtn.disabled = false;
+    startBtn.style.opacity = '1';
   }
 }
 
 startBtn.addEventListener('click', startApp);
-
 </script>
 </body>
 </html>
