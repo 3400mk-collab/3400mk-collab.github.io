@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>Asistente Visual Inteligente (Opción B - Optimizado)</title>
+  <title>Asistente Visual Inteligente - Versión A (rápida)</title>
 
   <!--
-    CSP práctica que permite TFJS en GitHub Pages (TFJS utiliza eval/inline en muchos entornos).
-    Si luego quieres endurecer la CSP, movemos scripts a archivos externos.
+    CSP práctica que permite TFJS en GitHub Pages.
+    Incluye 'unsafe-inline'/'unsafe-eval' porque TFJS y CDN usan eval/inline en muchos entornos.
+    Si quieres endurecer la CSP después, movemos scripts a archivos externos.
   -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
@@ -27,15 +28,9 @@
 
   <style>
     :root{--green:#2ea043}
-    body{
-      background:#0d1117;color:#fff;font-family:Segoe UI,Arial,sans-serif;
-      margin:0;padding:18px;text-align:center;
-    }
+    body{background:#0d1117;color:#fff;font-family:Segoe UI,Arial,sans-serif;margin:0;padding:18px;text-align:center}
     h1{margin:6px 0 12px;font-size:1.1rem}
-    #startButton{
-      font-size:1.1rem;padding:10px 22px;background:var(--green);border:none;border-radius:12px;color:#fff;
-      cursor:pointer;
-    }
+    #startButton{font-size:1.1rem;padding:10px 22px;background:var(--green);border:none;border-radius:12px;color:#fff;cursor:pointer}
     video{width:90%;max-width:480px;border-radius:12px;margin-top:12px;background:#000}
     #status{margin-top:12px;display:inline-block;background:rgba(255,255,255,.08);padding:10px 14px;border-radius:10px}
     #notify{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;background:rgba(0,0,0,.75);padding:8px 12px;border-radius:10px;opacity:0;transition:.25s;color:#fff}
@@ -43,7 +38,7 @@
   </style>
 </head>
 <body>
-  <h1>👁 Asistente Visual Inteligente (Opción B)</h1>
+  <h1>👁 Asistente Visual Inteligente (Versión A - rápida)</h1>
   <button id="startButton">Iniciar Asistente</button>
   <video id="video" autoplay playsinline muted></video>
   <div id="status">Esperando inicio...</div>
@@ -51,35 +46,43 @@
   <canvas id="debugCanvas"></canvas>
 
 <script>
-/* ============================
-   Opción B - Integración optimizada
-   - Mantiene la LOGICA de detección que solicitaste (niveles bajo/medio/alto).
-   - Mejoras: WebGL backend si está disponible, rate-limit, resolución baja de cámara,
-     TTS cancel/replace para evitar colas, smoothing/hysteresis.
-   - No se cambian umbrales de detección (solo adaptación relativa al frame en algunos casos).
-   ============================ */
+/* =====================
+   Versión A: método rápido (bounding-box anomalies)
+   - No se cambian los modelos ni la lógica principal.
+   - Añade detección universal (objetos sin clase) y sugerencia de rutas (izq/der).
+   - Mantiene smoothing/hysteresis, TTS optimizado, WebGL backend, rate-limit.
+   ===================== */
 
 const startBtn = document.getElementById('startButton');
 const statusDiv = document.getElementById('status');
 const notifyBox = document.getElementById('notify');
 const video = document.getElementById('video');
 const debugCanvas = document.getElementById('debugCanvas');
-const debugCtx = (debugCanvas.getContext && debugCanvas.getContext('2d')) || null;
+const debugCtx = debugCanvas.getContext && debugCanvas.getContext('2d');
 
 let cocoModel = null;
 let blazeModel = null;
-
 let lastMessage = '';
 let speaking = false;
 let lastFrameTime = 0;
 
-// Hysteresis counters (manteniendo tu lógica)
+// Hysteresis counters
 const COUNTER_MAX = 8;
-const THRESH_GO = 2; // frames consecutivos para considerar detectado
+const THRESH_GO = 2; // frames consecutivos para considerar estable
 let personCnt = 0, vehicleCnt = 0, wallCnt = 0, obsLowCnt = 0, obsMidCnt = 0, obsHighCnt = 0;
 
-// DEBUG: set true para ver canvas de depuración (no activo por defecto)
-let DEBUG = false;
+// Zonas (izq/centro/der) counters to decide route
+let leftCnt = 0, centerCnt = 0, rightCnt = 0;
+const ZONE_THRESH = 2; // frames para considerar zona ocupada/libre
+
+// General thresholds (adaptativos con respecto al frame area)
+const MIN_OBJ_AREA_RATIO = 0.008;   // 0.8% -> generic small obstacle threshold
+const GENERIC_BIG_RATIO = 0.02;     // 2% -> bigger objects (furniture etc)
+const PERSON_MIN_RATIO = 0.012;     // 1.2% (tunable)
+const VEHICLE_MIN_RATIO = 0.02;     // 2%
+const WALL_RATIO = 0.55;            // >55% frame area => wall/very close
+
+let DEBUG = false; // set true to show debug canvas and boxes
 
 function notify(msg){
   notifyBox.textContent = msg;
@@ -87,34 +90,30 @@ function notify(msg){
   setTimeout(()=> notifyBox.style.opacity = 0, 2200);
 }
 
-/* ---------------- TTS mejorado (evita colas y reduce latencia) ---------------- */
+/* ---------- TTS mejorado (evita colas) ---------- */
 function speak(msg){
   if(!msg) return;
-  // No repetir el mismo mensaje si ya se está hablando
+  // if same message is being spoken, avoid queueing duplicate
   if(msg === lastMessage && window.speechSynthesis && window.speechSynthesis.speaking) return;
   try{
-    if(window.speechSynthesis && window.speechSynthesis.speaking){
-      window.speechSynthesis.cancel(); // evita acumulación y latencia
-    }
+    if(window.speechSynthesis && window.speechSynthesis.speaking) window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(msg);
     u.lang = 'es-MX';
-    speaking = true;
     u.onend = ()=> { speaking = false; };
+    speaking = true;
     window.speechSynthesis.speak(u);
     lastMessage = msg;
     statusDiv.textContent = msg;
-  }catch(e){
-    console.warn('TTS error', e);
-  }
+  }catch(e){ console.warn('TTS error', e); }
 }
 
-/* ---------------- Cámara optimizada (baja resolución + framerate limitado) ---------------- */
+/* ---------- Cámara mobile-friendly ---------- */
 async function setupCamera(){
   const constraints = {
     audio: false,
     video: {
       facingMode: { ideal: 'environment' },
-      width: { ideal: 320 },   // optimizado para móviles
+      width: { ideal: 320 },
       height: { ideal: 240 },
       frameRate: { ideal: 15, max: 20 }
     }
@@ -122,9 +121,9 @@ async function setupCamera(){
   try{
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
-    video.muted = true; // ayuda con autoplay en móviles
+    video.muted = true;
     await new Promise(res => video.onloadedmetadata = res);
-    try { await video.play(); } catch(e){ /* ignora si play falla en algunos navegadores */ }
+    try{ await video.play(); } catch(e){ /* ignore */ }
   }catch(e){
     notify('No se puede acceder a la cámara.');
     speak('No se puede usar el asistente sin acceso a la cámara.');
@@ -132,17 +131,16 @@ async function setupCamera(){
   }
 }
 
-/* ---------------- Cargar modelos + forzar backend WebGL cuando sea posible ---------------- */
+/* ---------- Cargar modelos + WebGL ---------- */
 async function loadModels(){
   statusDiv.textContent = 'Cargando modelos...';
   notify('Cargando modelos...');
   try{
-    if (tf && tf.setBackend){
-      try { await tf.setBackend('webgl'); } catch(e){ console.warn('WebGL backend no disponible', e); }
+    if(tf && tf.setBackend){
+      try{ await tf.setBackend('webgl'); } catch(e){ console.warn('WebGL backend no disponible', e); }
     }
-    if (tf && tf.ready) await tf.ready();
+    if(tf && tf.ready) await tf.ready();
 
-    // COCO-SSD lite y BlazeFace (misma combinación que funcionó mejor)
     cocoModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
     blazeModel = await blazeface.load();
 
@@ -156,47 +154,68 @@ async function loadModels(){
   }
 }
 
-/* ---------------- Helpers detección niveles obstáculo (idéntico al index "mejor detección") ---------------- */
+/* ---------- Helpers ---------- */
 function clamp(n,min=0,max=COUNTER_MAX){ return Math.max(min, Math.min(max, n)); }
 
+/* Determina si bbox corresponde a un obstáculo en bajo/medio/alto */
 function obstacleLevels(obj, vw, vh){
-  // Devuelve {low:bool, mid:bool, high:bool}
   const [x,y,w,h] = obj.bbox;
   const area = w*h;
   const bottom = y + h;
 
-  const lowZone = vh * 0.70;    // parte baja del frame
-  const midZoneTop = vh * 0.35;  // medio
-  const highZone = vh * 0.25;    // alto
+  const lowZone = vh * 0.70;
+  const midZoneTop = vh * 0.35;
+  const highZone = vh * 0.25;
 
-  const low = (bottom > lowZone) && (area > (vw*vh*0.008)); // >=0.8% area
-  const mid = ((y + h/2) > midZoneTop && (y + h/2) <= lowZone) && (area > (vw*vh*0.008));
+  const low = (bottom > lowZone) && (area > (vw*vh*0.008));
+  const mid = ( (y + h/2) > midZoneTop && (y + h/2) <= lowZone ) && (area > (vw*vh*0.008));
   const high = (y < highZone) && (area > (vw*vh*0.006));
 
   return { low, mid, high };
 }
 
-/* ---------------- Main detection loop (B) - usaremos la DETECCIÓN "mejor" exactamente y optimizamos el pipeline ---------------- */
+/* Decide ocupación por zonas (left/center/right) usando centros de bbox y area */
+function zoneOccupancyFromPreds(preds, vw, vh){
+  // returns {left:bool, center:bool, right:bool}
+  let left = false, center = false, right = false;
+  // threshold area for zone occupancy (bigger than generic)
+  const zoneAreaThr = Math.max(GENERIC_BIG_RATIO, 0.01) * vw * vh; // at least 1% area
+  for(const obj of preds){
+    const [x,y,w,h] = obj.bbox;
+    const area = w*h;
+    const cx = x + w/2;
+    const zone = (cx < vw/3) ? 'left' : (cx > 2*vw/3) ? 'right' : 'center';
+    if(area >= zoneAreaThr){
+      if(zone === 'left') left = true;
+      else if(zone === 'center') center = true;
+      else if(zone === 'right') right = true;
+    }
+  }
+  return { left, center, right };
+}
+
+/* ---------- Main detection loop (Versión A) ---------- */
 async function detectLoop(ts){
   if(!ts) ts = performance.now();
 
-  // Rate control: objetivo ~6 FPS (160ms)
-  if(ts - lastFrameTime < 160) return requestAnimationFrame(detectLoop);
+  // Rate control: objetivo ~5-6 FPS (ajustable para móviles)
+  const RATE_MS = 170; // ~6 FPS
+  if(ts - lastFrameTime < RATE_MS) return requestAnimationFrame(detectLoop);
   lastFrameTime = ts;
 
   if(!cocoModel || !blazeModel) return requestAnimationFrame(detectLoop);
 
+  // Run detection (with try/catch to avoid crashes on camera hiccups)
   let cocoDet = [], blazeDet = [];
   try{
-    // Llamadas a detect y estimateFaces (pueden lanzar si la cámara cambia)
     cocoDet = await cocoModel.detect(video);
     blazeDet = await blazeModel.estimateFaces(video, false);
-  }catch(e){
+  } catch(e){
     console.warn('Error durante detección:', e);
     return requestAnimationFrame(detectLoop);
   }
 
-  // Mezcla predicciones (mantenemos exactamente la lógica de detección que querías)
+  // Combine predictions (coco + faces => person)
   const preds = [...cocoDet];
   blazeDet.forEach(face => preds.push({
     class: 'person',
@@ -212,31 +231,59 @@ async function detectLoop(ts){
   const vw = video.videoWidth || 320;
   const vh = video.videoHeight || 240;
 
+  // Flags per frame
   let personPresent = false, vehiclePresent = false, wallPresent = false;
   let anyLow=false, anyMid=false, anyHigh=false;
+  let genericObstaclePresent = false; // new: generic bb-based obstacle
+  let bigFurniturePresent = false;
 
-  // Mantén las mismas reglas de umbral que en el index de "mejor detección"
+  // List of COCO classes that commonly represent furniture/doors/large obstacles indoors
+  const FURNITURE_CLASSES = new Set([
+    'chair','couch','sofa','bed','dining table','table','door','bench','wardrobe','tv'
+  ]);
+
   for(const obj of preds){
     const [x,y,w,h] = obj.bbox;
     const area = w*h;
+    const areaRatio = area / (vw*vh);
 
-    // Personas (umbral adaptativo)
-    if(obj.class === 'person' && area > Math.max(10000, vw*vh*0.01)) personPresent = true;
+    // PERSON detection (adaptive)
+    if(obj.class === 'person' && areaRatio > Math.max(PERSON_MIN_RATIO, 12000 / (vw*vh))) personPresent = true;
 
-    // Vehículos
-    if(['car','truck','bus','motorcycle'].includes(obj.class) && area > Math.max(18000, vw*vh*0.02)) vehiclePresent = true;
+    // VEHICLE
+    if(['car','truck','bus','motorcycle','bicycle'].includes(obj.class) && areaRatio > VEHICLE_MIN_RATIO) vehiclePresent = true;
 
-    // Pared
-    if(area > vw*vh*0.55) wallPresent = true;
+    // WALL / CLOSE surface when occupies big chunk
+    if(areaRatio > WALL_RATIO) wallPresent = true;
 
-    // Niveles de obstáculo
+    // furniture / doors / big indoor items
+    if(FURNITURE_CLASSES.has(obj.class) && areaRatio > GENERIC_BIG_RATIO) bigFurniturePresent = true;
+
+    // generic bounding box anomaly: if object has certain minimum area (even if class unknown),
+    // treat as obstacle. This is the core of Method A.
+    if(areaRatio >= MIN_OBJ_AREA_RATIO) {
+      genericObstaclePresent = true;
+    }
+
+    // obstacle level (low/mid/high)
     const levels = obstacleLevels(obj, vw, vh);
     if(levels.low) anyLow = true;
     if(levels.mid) anyMid = true;
     if(levels.high) anyHigh = true;
   }
 
-  // Actualizar contadores (smoothing/hysteresis)
+  // Zone occupancy: left/center/right - used for route suggestion
+  const zones = zoneOccupancyFromPreds(preds, vw, vh);
+  // Update zone counters (we mark occupied when zone true)
+  leftCnt   = clamp(zones.left   ? leftCnt + 1   : leftCnt - 1);
+  centerCnt = clamp(zones.center ? centerCnt + 1 : centerCnt - 1);
+  rightCnt  = clamp(zones.right  ? rightCnt + 1  : rightCnt - 1);
+
+  const leftStable   = leftCnt   >= ZONE_THRESH;
+  const centerStable = centerCnt >= ZONE_THRESH;
+  const rightStable  = rightCnt  >= ZONE_THRESH;
+
+  // Update main counters with hysteresis (smoothing)
   personCnt  = clamp(personPresent  ? personCnt  + 1 : personCnt  - 1);
   vehicleCnt = clamp(vehiclePresent ? vehicleCnt + 1 : vehicleCnt - 1);
   wallCnt    = clamp(wallPresent    ? wallCnt    + 1 : wallCnt    - 1);
@@ -251,72 +298,108 @@ async function detectLoop(ts){
   const midStable     = obsMidCnt  >= THRESH_GO;
   const highStable    = obsHighCnt >= THRESH_GO;
 
-  // Prioridad exacta: pared > persona > vehículo > obstáculo alto>medio>bajo > libre
+  // Decide message priority:
+  // wall > person > vehicle > high obstacle > mid obstacle > low obstacle/generic furniture > route suggestion > free
   let message = 'Camino libre.';
-  if(wallStable) message = 'Pared al frente, deténgase.';
-  else if(personStable) message = 'Persona al frente, cuidado.';
-  else if(vehicleStable) message = 'Vehículo cerca, precaución.';
-  else if(highStable) message = 'Objeto alto al frente — cuidado.';
-  else if(midStable) message = 'Objeto a media altura al frente — cuidado.';
-  else if(lowStable) message = 'Objeto en el suelo obstruyendo el paso.';
 
-  // Sólo hablar si el mensaje cambió (evita flip-flops)
-  if(message !== lastMessage){
+  if(wallStable) {
+    message = 'Pared al frente, deténgase.';
+  } else if(personStable) {
+    message = 'Persona al frente, cuidado.';
+  } else if(vehicleStable) {
+    message = 'Vehículo cerca, precaución.';
+  } else if(highStable) {
+    message = 'Objeto alto al frente — cuidado.';
+  } else if(midStable) {
+    message = 'Objeto a media altura al frente — cuidado.';
+  } else if(lowStable) {
+    message = 'Objeto en el suelo obstruyendo el paso.';
+  } else if(bigFurniturePresent && genericObstaclePresent) {
+    // bigger furniture indoors
+    message = 'Obstáculo grande al frente (mueble/puerta) — cuidado.';
+  } else if(genericObstaclePresent) {
+    // generic obstacle detected by bounding-box anomalies
+    message = 'Objeto detectado al frente.';
+  } else {
+    // if center is occupied but a side is clear -> suggest route
+    // centerStable signifies zone occupied
+    if(centerStable) {
+      // prefer side with less occupancy
+      if(!leftStable && rightStable) {
+        message = 'Centro ocupado. Puedes intentar ir por la izquierda.';
+      } else if(!rightStable && leftStable) {
+        message = 'Centro ocupado. Puedes intentar ir por la derecha.';
+      } else if(!leftStable && !rightStable) {
+        message = 'Centro ocupado. Izquierda y derecha parecen libres, intenta girar con cuidado.';
+      } else {
+        // both sides occupied or ambiguous -> keep 'Camino libre.'? better warn
+        message = 'Centro ocupado y laterales también ocupados, deténgase y espere.';
+      }
+    } else {
+      message = 'Camino libre.';
+    }
+  }
+
+  // speak only when message changes (avoid flip-flops)
+  if(message !== lastMessage) {
     speak(message);
   }
 
-  // Debug draw (opcional)
+  // Draw debug boxes if requested
   if(DEBUG && debugCtx){
     debugCanvas.style.display = 'block';
     debugCanvas.width = 320; debugCanvas.height = 240;
     debugCtx.clearRect(0,0,debugCanvas.width,debugCanvas.height);
     debugCtx.strokeStyle = 'rgba(0,255,0,0.6)';
     debugCtx.lineWidth = 1;
-    preds.slice(0,6).forEach(p => {
+    // draw up to 8 boxes
+    preds.slice(0,8).forEach(p => {
       const [x,y,w,h] = p.bbox;
-      debugCtx.strokeRect(x * (debugCanvas.width/vw), y * (debugCanvas.height/vh), w * (debugCanvas.width/vw), h * (debugCanvas.height/vh));
+      // scale to debug canvas
+      const sx = x * (debugCanvas.width / vw);
+      const sy = y * (debugCanvas.height / vh);
+      const sw = w * (debugCanvas.width / vw);
+      const sh = h * (debugCanvas.height / vh);
+      debugCtx.strokeRect(sx, sy, sw, sh);
+      debugCtx.fillStyle = 'rgba(0,255,0,0.06)';
+      debugCtx.fillRect(sx, sy, sw, sh);
     });
-  } else if(debugCtx) {
-    debugCanvas.style.display = 'none';
   }
 
   requestAnimationFrame(detectLoop);
 }
 
-/* ---------------- Start app ---------------- */
+/* ---------- Start app ---------- */
 async function startApp(){
   startBtn.disabled = true;
   startBtn.style.opacity = '0.6';
   notify('Solicitando cámara...');
   statusDiv.textContent = 'Solicitando cámara...';
-
   try{
     await setupCamera();
     notify('Cámara activada');
     statusDiv.textContent = 'Cámara lista';
-
     await loadModels();
 
-    // reset counters & state
+    // reset counters
     personCnt = vehicleCnt = wallCnt = obsLowCnt = obsMidCnt = obsHighCnt = 0;
+    leftCnt = centerCnt = rightCnt = 0;
     lastMessage = '';
 
     notify('Asistente iniciado');
     statusDiv.textContent = 'Asistente iniciado';
 
-    // inicia loop de detección optimizado
     requestAnimationFrame(detectLoop);
-
   }catch(e){
     console.error('Error iniciando app:', e);
-    statusDiv.textContent = 'Error crítico. Revisa permisos y consola.';
+    statusDiv.textContent = 'Error crítico. Revisa permisos/consola.';
     notify('No se pudo iniciar. Revisa permisos.');
-    startBtn.disabled = false;
-    startBtn.style.opacity = '1';
+    startBtn.disabled = false; startBtn.style.opacity = '1';
   }
 }
 
 startBtn.addEventListener('click', startApp);
+
 </script>
 </body>
 </html>
