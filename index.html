@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>Asistente Visual Inteligente - Versión A (rápida)</title>
+  <title>Asistente Visual Inteligente - Versión A (rápida, B: suavizado)</title>
 
   <!--
     CSP práctica que permite TFJS en GitHub Pages.
@@ -38,7 +38,7 @@
   </style>
 </head>
 <body>
-  <h1>👁 Asistente Visual Inteligente (Versión A - rápida)</h1>
+  <h1>👁 Asistente Visual Inteligente (Versión A - B: suavizado)</h1>
   <button id="startButton">Iniciar Asistente</button>
   <video id="video" autoplay playsinline muted></video>
   <div id="status">Esperando inicio...</div>
@@ -47,10 +47,13 @@
 
 <script>
 /* =====================
-   Versión A: método rápido (bounding-box anomalies)
-   - No se cambian los modelos ni la lógica principal.
-   - Añade detección universal (objetos sin clase) y sugerencia de rutas (izq/der).
-   - Mantiene smoothing/hysteresis, TTS optimizado, WebGL backend, rate-limit.
+   Versión A con ajuste B (suavizado moderado)
+   - Mantiene modelos y lógica.
+   - Mejora la lógica de TTS para evitar flip-flops:
+     * voz separada de texto (lastSpokenMessage),
+     * temporizador para "Camino libre" (voiceCooldownMs)
+     * no interrumpir anuncios de peligro inmediatamente.
+   - Mantiene detección de obstáculos por niveles y sugerencia de ruta.
    ===================== */
 
 const startBtn = document.getElementById('startButton');
@@ -63,6 +66,8 @@ const debugCtx = debugCanvas.getContext && debugCanvas.getContext('2d');
 let cocoModel = null;
 let blazeModel = null;
 let lastMessage = '';
+let lastSpokenMessage = '';   // separado para control de voz
+let lastSpokenAt = 0;         // timestamp ms de la última vez que se habló
 let speaking = false;
 let lastFrameTime = 0;
 
@@ -90,21 +95,59 @@ function notify(msg){
   setTimeout(()=> notifyBox.style.opacity = 0, 2200);
 }
 
-/* ---------- TTS mejorado (evita colas) ---------- */
+/* ---------- VOZ: mejora B (suavizado moderado) ---------- */
+/*
+ Strategy:
+ - lastSpokenMessage y lastSpokenAt controlan lo dicho.
+ - voiceCooldownMs evita que "Camino libre" interrumpa anuncios peligrosos demasiado pronto.
+ - Si el nuevo mensaje es peligro (no 'Camino libre'), se puede anunciar tan pronto como sea estable.
+ - Si el nuevo mensaje es 'Camino libre', esperamos voiceCooldownMs desde el último mensaje que no sea 'Camino libre' (o desde lastSpokenAt)
+   para evitar que la voz diga "libre" entre detecciones fluctuantes.
+ - Además no encolamos múltiples utterances: cancelamos cola si estamos a punto de hablar algo distinto.
+*/
+const voiceCooldownMs = 600; // opción B ~600 ms
 function speak(msg){
   if(!msg) return;
-  // if same message is being spoken, avoid queueing duplicate
-  if(msg === lastMessage && window.speechSynthesis && window.speechSynthesis.speaking) return;
-  try{
-    if(window.speechSynthesis && window.speechSynthesis.speaking) window.speechSynthesis.cancel();
+
+  const now = performance.now();
+
+  // If same as last spoken and still within cool period, ignore
+  if(msg === lastSpokenMessage && (now - lastSpokenAt) < 1000) {
+    // already said recently
+    return;
+  }
+
+  // If incoming msg is "Camino libre." we only speak it if:
+  // - the last spoken message was also "Camino libre." and enough time passed OR
+  // - voice cooldown since last non-free message has elapsed
+  if(msg === 'Camino libre.') {
+    // if last spoken was danger and cooldown not passed, skip
+    if(lastSpokenMessage && lastSpokenMessage !== 'Camino libre.' && (now - lastSpokenAt) < voiceCooldownMs) {
+      return;
+    }
+    // else allowed to speak (but still avoid re-saying it too often)
+  } else {
+    // If new msg is a danger msg (obstacle/wall/person/vehicle), allow immediate speak,
+    // but avoid enqueuing multiple utterances: cancel queue first.
+  }
+
+  try {
+    if(window.speechSynthesis && window.speechSynthesis.speaking) {
+      // Cancel queued utterances to reduce backlog & latency
+      window.speechSynthesis.cancel();
+    }
     const u = new SpeechSynthesisUtterance(msg);
     u.lang = 'es-MX';
-    u.onend = ()=> { speaking = false; };
     speaking = true;
+    u.onend = () => { speaking = false; };
     window.speechSynthesis.speak(u);
-    lastMessage = msg;
+    lastSpokenMessage = msg;
+    lastSpokenAt = now;
+    // update visible text
     statusDiv.textContent = msg;
-  }catch(e){ console.warn('TTS error', e); }
+  } catch (e) {
+    console.warn('TTS error', e);
+  }
 }
 
 /* ---------- Cámara mobile-friendly ---------- */
@@ -176,9 +219,7 @@ function obstacleLevels(obj, vw, vh){
 
 /* Decide ocupación por zonas (left/center/right) usando centros de bbox y area */
 function zoneOccupancyFromPreds(preds, vw, vh){
-  // returns {left:bool, center:bool, right:bool}
   let left = false, center = false, right = false;
-  // threshold area for zone occupancy (bigger than generic)
   const zoneAreaThr = Math.max(GENERIC_BIG_RATIO, 0.01) * vw * vh; // at least 1% area
   for(const obj of preds){
     const [x,y,w,h] = obj.bbox;
@@ -194,7 +235,7 @@ function zoneOccupancyFromPreds(preds, vw, vh){
   return { left, center, right };
 }
 
-/* ---------- Main detection loop (Versión A) ---------- */
+/* ---------- Main detection loop (Versión A con B voice) ---------- */
 async function detectLoop(ts){
   if(!ts) ts = performance.now();
 
@@ -237,7 +278,7 @@ async function detectLoop(ts){
   let genericObstaclePresent = false; // new: generic bb-based obstacle
   let bigFurniturePresent = false;
 
-  // List of COCO classes that commonly represent furniture/doors/large obstacles indoors
+  // List of COCO classes commonly representing furniture/doors/large indoor obstacles
   const FURNITURE_CLASSES = new Set([
     'chair','couch','sofa','bed','dining table','table','door','bench','wardrobe','tv'
   ]);
@@ -260,7 +301,7 @@ async function detectLoop(ts){
     if(FURNITURE_CLASSES.has(obj.class) && areaRatio > GENERIC_BIG_RATIO) bigFurniturePresent = true;
 
     // generic bounding box anomaly: if object has certain minimum area (even if class unknown),
-    // treat as obstacle. This is the core of Method A.
+    // treat as obstacle.
     if(areaRatio >= MIN_OBJ_AREA_RATIO) {
       genericObstaclePresent = true;
     }
@@ -274,7 +315,6 @@ async function detectLoop(ts){
 
   // Zone occupancy: left/center/right - used for route suggestion
   const zones = zoneOccupancyFromPreds(preds, vw, vh);
-  // Update zone counters (we mark occupied when zone true)
   leftCnt   = clamp(zones.left   ? leftCnt + 1   : leftCnt - 1);
   centerCnt = clamp(zones.center ? centerCnt + 1 : centerCnt - 1);
   rightCnt  = clamp(zones.right  ? rightCnt + 1  : rightCnt - 1);
@@ -315,16 +355,12 @@ async function detectLoop(ts){
   } else if(lowStable) {
     message = 'Objeto en el suelo obstruyendo el paso.';
   } else if(bigFurniturePresent && genericObstaclePresent) {
-    // bigger furniture indoors
     message = 'Obstáculo grande al frente (mueble/puerta) — cuidado.';
   } else if(genericObstaclePresent) {
-    // generic obstacle detected by bounding-box anomalies
     message = 'Objeto detectado al frente.';
   } else {
-    // if center is occupied but a side is clear -> suggest route
-    // centerStable signifies zone occupied
+    // route suggestion if center occupied and sides free/clear
     if(centerStable) {
-      // prefer side with less occupancy
       if(!leftStable && rightStable) {
         message = 'Centro ocupado. Puedes intentar ir por la izquierda.';
       } else if(!rightStable && leftStable) {
@@ -332,7 +368,6 @@ async function detectLoop(ts){
       } else if(!leftStable && !rightStable) {
         message = 'Centro ocupado. Izquierda y derecha parecen libres, intenta girar con cuidado.';
       } else {
-        // both sides occupied or ambiguous -> keep 'Camino libre.'? better warn
         message = 'Centro ocupado y laterales también ocupados, deténgase y espere.';
       }
     } else {
@@ -340,9 +375,45 @@ async function detectLoop(ts){
     }
   }
 
-  // speak only when message changes (avoid flip-flops)
+  // update visual always
   if(message !== lastMessage) {
-    speak(message);
+    lastMessage = message;
+    // show text to user immediately
+    statusDiv.textContent = message;
+  }
+
+  // Determine whether to speak, applying B-smoothing rules:
+  // - If incoming message is non-free (danger), speak if it's different from lastSpokenMessage (and stable)
+  // - If incoming message is 'Camino libre.', only speak it if cooldown elapsed since last non-free spoken message
+  const now = performance.now();
+  const isDanger = message !== 'Camino libre.';
+
+  if(isDanger) {
+    // If danger and stable (we already have stability via *_Stable variables), speak if changed
+    // We also allow speaking even if lastSpokenMessage was 'Camino libre.'; this is intended.
+    if(message !== lastSpokenMessage) {
+      speak(message);
+    }
+  } else {
+    // candidate is 'Camino libre.'
+    // Only speak if either:
+    //  - lastSpokenMessage is also 'Camino libre.' but enough time passed (avoid rapid repeats)
+    //  - OR cooldown since lastSpokenAt (if last was danger) has passed
+    const sinceLastSpoken = now - (lastSpokenAt || 0);
+    if(lastSpokenMessage === 'Camino libre.') {
+      // if we've not spoken 'Camino libre.' recently, speak
+      if(sinceLastSpoken > Math.max(800, voiceCooldownMs)) {
+        speak(message);
+      }
+    } else {
+      // last spoken wasn't 'Camino libre.'
+      if(sinceLastSpoken > voiceCooldownMs) {
+        // additionally ensure no danger counts active (small extra check)
+        if(!(personCnt > 0 || wallCnt > 0 || vehicleCnt > 0 || obsLowCnt > 0 || obsMidCnt > 0 || obsHighCnt > 0)) {
+          speak(message);
+        }
+      }
+    }
   }
 
   // Draw debug boxes if requested
@@ -352,10 +423,8 @@ async function detectLoop(ts){
     debugCtx.clearRect(0,0,debugCanvas.width,debugCanvas.height);
     debugCtx.strokeStyle = 'rgba(0,255,0,0.6)';
     debugCtx.lineWidth = 1;
-    // draw up to 8 boxes
     preds.slice(0,8).forEach(p => {
       const [x,y,w,h] = p.bbox;
-      // scale to debug canvas
       const sx = x * (debugCanvas.width / vw);
       const sy = y * (debugCanvas.height / vh);
       const sw = w * (debugCanvas.width / vw);
@@ -385,6 +454,8 @@ async function startApp(){
     personCnt = vehicleCnt = wallCnt = obsLowCnt = obsMidCnt = obsHighCnt = 0;
     leftCnt = centerCnt = rightCnt = 0;
     lastMessage = '';
+    lastSpokenMessage = '';
+    lastSpokenAt = 0;
 
     notify('Asistente iniciado');
     statusDiv.textContent = 'Asistente iniciado';
@@ -399,7 +470,6 @@ async function startApp(){
 }
 
 startBtn.addEventListener('click', startApp);
-
 </script>
 </body>
 </html>
