@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>Asistente Visual Inteligente - Versión A (rápida, B: suavizado)</title>
 
-  <!-- CSP segura compatible con TFJS para GitHub Pages -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
     script-src 'self' https://cdn.jsdelivr.net https://cdn.jsdelivr.net/npm 'unsafe-inline' 'unsafe-eval';
@@ -17,7 +16,6 @@
     frame-ancestors 'none';
   ">
 
-  <!-- TensorFlow.js y modelos -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
@@ -33,7 +31,6 @@
     #debugCanvas{position:fixed;right:12px;top:12px;width:160px;height:120px;border:1px solid rgba(255,255,255,.08);display:none}
   </style>
 </head>
-
 <body>
   <h1>👁 Asistente Visual Inteligente (Versión A - B: suavizado)</h1>
   <button id="startButton">Iniciar Asistente</button>
@@ -43,9 +40,9 @@
   <canvas id="debugCanvas"></canvas>
 
 <script>
-/* =============================
-   VERSIÓN A + SUAVIZADO B COMPLETO
-   ============================= */
+/* =====================
+   Versión A con mejora B (suavizado)
+===================== */
 
 const startBtn = document.getElementById('startButton');
 const statusDiv = document.getElementById('status');
@@ -54,22 +51,25 @@ const video = document.getElementById('video');
 const debugCanvas = document.getElementById('debugCanvas');
 const debugCtx = debugCanvas.getContext && debugCanvas.getContext('2d');
 
-let cocoModel = null;
-let blazeModel = null;
+let cocoModel = null, blazeModel = null;
+
 let lastMessage = '';
 let lastSpokenMessage = '';
 let lastSpokenAt = 0;
 let speaking = false;
 let lastFrameTime = 0;
 
+// Hysteresis counters
 const COUNTER_MAX = 8;
 const THRESH_GO = 2;
+
 let personCnt = 0, vehicleCnt = 0, wallCnt = 0;
 let obsLowCnt = 0, obsMidCnt = 0, obsHighCnt = 0;
 
-let leftCnt=0, centerCnt=0, rightCnt=0;
+let leftCnt = 0, centerCnt = 0, rightCnt = 0;
 const ZONE_THRESH = 2;
 
+// Thresholds
 const MIN_OBJ_AREA_RATIO = 0.008;
 const GENERIC_BIG_RATIO = 0.02;
 const PERSON_MIN_RATIO = 0.012;
@@ -84,33 +84,35 @@ function notify(msg){
   setTimeout(()=> notifyBox.style.opacity = 0, 2200);
 }
 
+/* ----------- VOZ ----------- */
 const voiceCooldownMs = 600;
+
 function speak(msg){
   if(!msg) return;
+
   const now = performance.now();
 
   if(msg === lastSpokenMessage && (now - lastSpokenAt) < 1000) return;
 
   if(msg === 'Camino libre.') {
-    if(lastSpokenMessage && lastSpokenMessage !== 'Camino libre.' &&
-       (now - lastSpokenAt) < voiceCooldownMs) return;
+    if(lastSpokenMessage && lastSpokenMessage !== 'Camino libre.' && (now - lastSpokenAt) < voiceCooldownMs) {
+      return;
+    }
   }
 
-  try {
-    if(window.speechSynthesis && window.speechSynthesis.speaking){
-      window.speechSynthesis.cancel();
-    }
+  try{
+    if(window.speechSynthesis.speaking) window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(msg);
-    u.lang='es-MX';
-    speaking=true;
-    u.onend=()=> speaking=false;
+    u.lang = 'es-MX';
+    speaking = true;
+    u.onend = ()=> speaking=false;
     window.speechSynthesis.speak(u);
     lastSpokenMessage = msg;
     lastSpokenAt = now;
-    statusDiv.textContent = msg;
   }catch(e){}
 }
 
+/* ----------- Cámara ----------- */
 async function setupCamera(){
   const constraints = {
     audio:false,
@@ -121,177 +123,169 @@ async function setupCamera(){
       frameRate:{ideal:15,max:20}
     }
   };
+
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
   video.srcObject = stream;
-  await new Promise(res=>video.onloadedmetadata=res);
+  video.muted = true;
+  await new Promise(res=> video.onloadedmetadata=res);
   await video.play();
 }
 
+/* ----------- Modelos ----------- */
 async function loadModels(){
   statusDiv.textContent='Cargando modelos...';
-  if(tf && tf.setBackend){
-    try{ await tf.setBackend('webgl'); } catch(e){}
-  }
+  await tf.setBackend('webgl');
   await tf.ready();
+
   cocoModel = await cocoSsd.load({base:'lite_mobilenet_v2'});
   blazeModel = await blazeface.load();
+
   statusDiv.textContent='Modelos cargados ✔';
+  notify('Modelos listos');
 }
 
-function clamp(n,min=0,max=COUNTER_MAX){return Math.max(min,Math.min(max,n));}
+/* ----------- Obstacle helpers ----------- */
+function clamp(n,min=0,max=COUNTER_MAX){ return Math.max(min,Math.min(max,n)); }
 
 function obstacleLevels(obj,vw,vh){
-  const [x,y,w,h]=obj.bbox;
+  const [x,y,w,h] = obj.bbox;
   const area = w*h;
-  const bottom=y+h;
+  const bottom = y + h;
 
-  const lowZone = vh*0.70;
-  const midZoneTop = vh*0.35;
-  const highZone = vh*0.25;
+  const lowZone = vh * 0.70;
+  const midZoneTop = vh * 0.35;
+  const highZone = vh * 0.25;
 
-  const low = bottom>lowZone && area>(vw*vh*0.008);
-  const mid = (y+h/2)>midZoneTop && (y+h/2)<=lowZone && area>(vw*vh*0.008);
-  const high = y<highZone && area>(vw*vh*0.006);
-
-  return{low,mid,high};
+  return {
+    low : bottom > lowZone && area > vw*vh*0.008,
+    mid : (y+h/2)>midZoneTop && (y+h/2)<=lowZone && area > vw*vh*0.008,
+    high: y < highZone && area > vw*vh*0.006
+  };
 }
 
-function zoneOccupancyFromPreds(preds,vw,vh){
+function zoneOccupancy(preds,vw,vh){
   let left=false,center=false,right=false;
-  const zoneAreaThr=Math.max(GENERIC_BIG_RATIO,0.01)*vw*vh;
-  for(const obj of preds){
-    const [x,y,w,h]=obj.bbox;
-    const area=w*h;
-    if(area<zoneAreaThr) continue;
-    const cx=x+w/2;
-    const zone=(cx<vw/3)?'left':(cx>2*vw/3)?'right':'center';
-    if(zone==='left') left=true;
-    else if(zone==='center') center=true;
-    else if(zone==='right') right=true;
-  }
-  return{left,center,right};
+  const thr = Math.max(GENERIC_BIG_RATIO,0.01)*vw*vh;
+
+  preds.forEach(o=>{
+    const [x,y,w,h] = o.bbox;
+    const area = w*h;
+    if(area < thr) return;
+    const cx = x + w/2;
+    if(cx < vw/3) left = true;
+    else if(cx > 2*vw/3) right = true;
+    else center = true;
+  });
+
+  return {left,center,right};
 }
 
+/* ----------- DETECCIÓN ----------- */
 async function detectLoop(ts){
-  if(!ts) ts=performance.now();
-
-  const RATE_MS=170;
-  if(ts-lastFrameTime < RATE_MS) return requestAnimationFrame(detectLoop);
+  if(!ts) ts = performance.now();
+  const RATE = 170;
+  if(ts - lastFrameTime < RATE) return requestAnimationFrame(detectLoop);
   lastFrameTime = ts;
 
-  if(!cocoModel||!blazeModel) return requestAnimationFrame(detectLoop);
-
-  let cocoDet=[], blazeDet=[];
+  let cocoDet=[], faces=[];
   try{
     cocoDet = await cocoModel.detect(video);
-    blazeDet = await blazeModel.estimateFaces(video,false);
-  }catch(e){
-    return requestAnimationFrame(detectLoop);
-  }
+    faces = await blazeModel.estimateFaces(video,false);
+  }catch(e){ return requestAnimationFrame(detectLoop); }
 
-  const preds=[...cocoDet];
-  blazeDet.forEach(face=>{
+  const preds = [...cocoDet];
+  faces.forEach(f=>{
     preds.push({
-      class:'person', score:0.9,
-      bbox:[
-        face.topLeft[0],
-        face.topLeft[1],
-        face.bottomRight[0]-face.topLeft[0],
-        face.bottomRight[1]-face.topLeft[1]
-      ]
+      class:'person',
+      score:0.9,
+      bbox:[ f.topLeft[0],f.topLeft[1], f.bottomRight[0]-f.topLeft[0], f.bottomRight[1]-f.topLeft[1] ]
     });
   });
 
-  const vw=video.videoWidth||320;
-  const vh=video.videoHeight||240;
+  const vw = video.videoWidth, vh = video.videoHeight;
 
   let person=false, vehicle=false, wall=false;
-  let anyLow=false, anyMid=false, anyHigh=false;
-  let genericObstacle=false, bigFurniture=false;
+  let low=false, mid=false, high=false;
+  let generic=false, furniture=false;
 
-  const FURNITURE_CLASSES=new Set([
-    'chair','couch','sofa','bed','dining table','table','door','bench','wardrobe','tv'
-  ]);
+  const FURNITURE = new Set(['chair','couch','sofa','bed','dining table','table','door','bench','wardrobe','tv']);
 
-  for(const obj of preds){
-    const [x,y,w,h]=obj.bbox;
-    const area=w*h;
-    const ratio=area/(vw*vh);
+  preds.forEach(o=>{
+    const [x,y,w,h] = o.bbox;
+    const area = w*h;
+    const r = area/(vw*vh);
 
-    if(obj.class==='person' && ratio>Math.max(PERSON_MIN_RATIO,12000/(vw*vh))) person=true;
-    if(['car','truck','bus','motorcycle','bicycle'].includes(obj.class)&& ratio>VEHICLE_MIN_RATIO) vehicle=true;
-    if(ratio>WALL_RATIO) wall=true;
-    if(FURNITURE_CLASSES.has(obj.class)&& ratio>GENERIC_BIG_RATIO) bigFurniture=true;
-    if(ratio>=MIN_OBJ_AREA_RATIO) genericObstacle=true;
+    if(o.class==='person' && r>PERSON_MIN_RATIO) person=true;
+    if(['car','truck','bus','motorcycle','bicycle'].includes(o.class) && r>VEHICLE_MIN_RATIO) vehicle=true;
+    if(r>WALL_RATIO) wall=true;
+    if(FURNITURE.has(o.class) && r>GENERIC_BIG_RATIO) furniture=true;
+    if(r>MIN_OBJ_AREA_RATIO) generic=true;
 
-    const lv = obstacleLevels(obj,vw,vh);
-    if(lv.low) anyLow=true;
-    if(lv.mid) anyMid=true;
-    if(lv.high) anyHigh=true;
-  }
+    const lv = obstacleLevels(o,vw,vh);
+    if(lv.low) low=true;
+    if(lv.mid) mid=true;
+    if(lv.high) high=true;
+  });
 
-  const zones = zoneOccupancyFromPreds(preds,vw,vh);
-  leftCnt = clamp(zones.left?leftCnt+1:leftCnt-1);
-  centerCnt = clamp(zones.center?centerCnt+1:centerCnt-1);
-  rightCnt = clamp(zones.right?rightCnt+1:rightCnt-1);
+  const z = zoneOccupancy(preds,vw,vh);
+  leftCnt   = clamp(z.left   ? leftCnt+1   : leftCnt-1);
+  centerCnt = clamp(z.center ? centerCnt+1 : centerCnt-1);
+  rightCnt  = clamp(z.right  ? rightCnt+1  : rightCnt-1);
 
-  const L = leftCnt>=ZONE_THRESH;
-  const C = centerCnt>=ZONE_THRESH;
-  const R = rightCnt>=ZONE_THRESH;
+  const leftS   = leftCnt   >= ZONE_THRESH;
+  const centerS = centerCnt >= ZONE_THRESH;
+  const rightS  = rightCnt  >= ZONE_THRESH;
 
-  personCnt=clamp(person?personCnt+1:personCnt-1);
-  vehicleCnt=clamp(vehicle?vehicleCnt+1:vehicleCnt-1);
-  wallCnt=clamp(wall?wallCnt+1:wallCnt-1);
-  obsLowCnt=clamp(anyLow?obsLowCnt+1:obsLowCnt-1);
-  obsMidCnt=clamp(anyMid?obsMidCnt+1:obsMidCnt-1);
-  obsHighCnt=clamp(anyHigh?obsHighCnt+1:obsHighCnt-1);
+  personCnt  = clamp(person  ? personCnt+1  : personCnt-1);
+  vehicleCnt = clamp(vehicle ? vehicleCnt+1 : vehicleCnt-1);
+  wallCnt    = clamp(wall    ? wallCnt+1    : wallCnt-1);
+  obsLowCnt  = clamp(low     ? obsLowCnt+1  : obsLowCnt-1);
+  obsMidCnt  = clamp(mid     ? obsMidCnt+1  : obsMidCnt-1);
+  obsHighCnt = clamp(high    ? obsHighCnt+1 : obsHighCnt-1);
 
-  const p=personCnt>=THRESH_GO;
-  const v=vehicleCnt>=THRESH_GO;
-  const wll=wallCnt>=THRESH_GO;
-  const low=obsLowCnt>=THRESH_GO;
-  const mid=obsMidCnt>=THRESH_GO;
-  const high=obsHighCnt>=THRESH_GO;
+  const ps = personCnt>=THRESH_GO;
+  const vs = vehicleCnt>=THRESH_GO;
+  const ws = wallCnt>=THRESH_GO;
+  const ls = obsLowCnt>=THRESH_GO;
+  const ms = obsMidCnt>=THRESH_GO;
+  const hs = obsHighCnt>=THRESH_GO;
 
-  let message='Camino libre.';
+  let message = 'Camino libre.';
 
-  if(wll) message='Pared al frente, deténgase.';
-  else if(p) message='Persona al frente, cuidado.';
-  else if(v) message='Vehículo cerca, precaución.';
-  else if(high) message='Objeto alto al frente — cuidado.';
-  else if(mid) message='Objeto a media altura al frente — cuidado.';
-  else if(low) message='Objeto en el suelo obstruyendo el paso.';
-  else if(bigFurniture && genericObstacle) message='Obstáculo grande al frente — cuidado.';
-  else if(genericObstacle) message='Objeto detectado al frente.';
+  if(ws) message='Pared al frente, deténgase.';
+  else if(ps) message='Persona al frente, cuidado.';
+  else if(vs) message='Vehículo cerca, precaución.';
+  else if(hs) message='Objeto alto al frente — cuidado.';
+  else if(ms) message='Objeto a media altura al frente — cuidado.';
+  else if(ls) message='Objeto en el suelo obstruyendo el paso.';
+  else if(furniture && generic) message='Obstáculo grande al frente — cuidado.';
+  else if(generic) message='Objeto detectado al frente.';
   else {
-    if(C){
-      if(!L && R) message='Centro ocupado. Puedes intentar ir por la izquierda.';
-      else if(!R && L) message='Centro ocupado. Puedes intentar ir por la derecha.';
-      else if(!L && !R) message='Centro ocupado. Izquierda y derecha parecen libres.';
-      else message='Centro ocupado y laterales también ocupados, deténgase.';
+    if(centerS){
+      if(!leftS && rightS) message='Centro ocupado. Puedes ir por la izquierda.';
+      else if(!rightS && leftS) message='Centro ocupado. Puedes ir por la derecha.';
+      else if(!leftS && !rightS) message='Centro ocupado. Laterales libres.';
+      else message='Centro y laterales ocupados. Deténgase.';
     }
   }
 
-  if(message!==lastMessage){
-    lastMessage=message;
-    statusDiv.textContent=message;
+  if(message !== lastMessage){
+    lastMessage = message;
+    statusDiv.textContent = message;
   }
 
-  const now=performance.now();
-  const danger = message!=='Camino libre.';
+  const now = performance.now();
+  const danger = message !== 'Camino libre.';
 
   if(danger){
-    if(message!==lastSpokenMessage) speak(message);
+    if(message !== lastSpokenMessage) speak(message);
   } else {
-    const dt = now - lastSpokenAt;
-    if(lastSpokenMessage==='Camino libre.'){
-      if(dt>Math.max(800,voiceCooldownMs)) speak(message);
+    const t = now - lastSpokenAt;
+    if(lastSpokenMessage === 'Camino libre.') {
+      if(t > 800) speak(message);
     } else {
-      if(dt>voiceCooldownMs){
-        if(!(personCnt>0 || wallCnt>0 || vehicleCnt>0 ||
-             obsLowCnt>0||obsMidCnt>0||obsHighCnt>0)){
-          speak(message);
-        }
+      if(t > voiceCooldownMs && !(personCnt>0||wallCnt>0||vehicleCnt>0||obsLowCnt>0||obsMidCnt>0||obsHighCnt>0)){
+        speak(message);
       }
     }
   }
@@ -299,20 +293,18 @@ async function detectLoop(ts){
   requestAnimationFrame(detectLoop);
 }
 
+/* ----------- START ----------- */
 async function startApp(){
-  startBtn.disabled=true;
-  notify('Solicitando cámara...');
+  startBtn.disabled = true;
   statusDiv.textContent='Solicitando cámara...';
 
   try{
     await setupCamera();
-    notify('Cámara activada');
-    statusDiv.textContent='Cámara activada';
-
+    statusDiv.textContent='Cámara lista';
     await loadModels();
-    notify('Modelos listos');
-    statusDiv.textContent='Modelos cargados ✔';
 
+    personCnt=vehicleCnt=wallCnt=obsLowCnt=obsMidCnt=obsHighCnt=0;
+    leftCnt=centerCnt=rightCnt=0;
     lastMessage='';
     lastSpokenMessage='';
     lastSpokenAt=0;
@@ -323,12 +315,11 @@ async function startApp(){
     requestAnimationFrame(detectLoop);
   }catch(e){
     console.error(e);
-    statusDiv.textContent='Error crítico. Revisa permisos.';
+    statusDiv.textContent='Error crítico. Revisa permisos o consola.';
   }
 }
 
-startBtn.addEventListener('click',startApp);
+startBtn.onclick = startApp;
 </script>
-
 </body>
 </html>
